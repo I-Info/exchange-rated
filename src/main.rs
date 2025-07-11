@@ -276,13 +276,42 @@ fn generate_html(history: &[RateRecord]) -> String {
 
     let history_rows = history
         .iter()
-        .map(|record| {
+        .enumerate()
+        .map(|(index, record)| {
+            let (change_indicator, change_amount) = if index < history.len() - 1 {
+                let previous_rate: f64 = history[index + 1].rate.parse().unwrap_or(0.0);
+                let current_rate: f64 = record.rate.parse().unwrap_or(0.0);
+                let change = current_rate - previous_rate;
+
+                if change > 0.0 {
+                    (
+                        format!("<span class='trend-up'>↗</span>"),
+                        format!("<span class='change-up'>+{:.2}</span>", change),
+                    )
+                } else if change < 0.0 {
+                    (
+                        format!("<span class='trend-down'>↘</span>"),
+                        format!("<span class='change-down'>{:.2}</span>", change),
+                    )
+                } else {
+                    (
+                        format!("<span class='trend-flat'>→</span>"),
+                        format!("<span class='change-flat'>0.0000</span>"),
+                    )
+                }
+            } else {
+                (String::new(), String::new())
+            };
+
             format!(
                 "<tr>
+                    <td>{} {}</td>
                     <td>{}</td>
                     <td>{}</td>
                 </tr>",
                 record.rate,
+                change_indicator,
+                change_amount,
                 record.timestamp.format("%Y/%m/%d %H:%M:%S")
             )
         })
@@ -394,6 +423,37 @@ fn generate_html(history: &[RateRecord]) -> String {
             color: #666;
             font-size: 0.9em;
         }}
+        .trend-up {{
+            color: #28a745;
+            font-weight: bold;
+            font-size: 1.2em;
+        }}
+        .trend-down {{
+            color: #dc3545;
+            font-weight: bold;
+            font-size: 1.2em;
+        }}
+        .trend-flat {{
+            color: #6c757d;
+            font-weight: bold;
+            font-size: 1.2em;
+        }}
+        .change-up {{
+            color: #28a745;
+            font-weight: bold;
+            font-size: 0.9em;
+        }}
+        .change-down {{
+            color: #dc3545;
+            font-weight: bold;
+            font-size: 0.9em;
+        }}
+        .change-flat {{
+            color: #6c757d;
+            font-weight: bold;
+            font-size: 0.9em;
+        }}
+        }}
     </style>
     <script>
         let ws;
@@ -424,9 +484,29 @@ fn generate_html(history: &[RateRecord]) -> String {
 
         function updateHistory(records) {{
             const tbody = document.querySelector('table tbody');
-            tbody.innerHTML = records.map(record => {{
+            tbody.innerHTML = records.map((record, index) => {{
                 const timestamp = new Date(record.timestamp).toLocaleString('zh-CN');
-                return `<tr><td>${{record.rate}}</td><td>${{timestamp}}</td></tr>`;
+                let changeIndicator = '';
+                let changeAmount = '';
+
+                if (index < records.length - 1) {{
+                    const previousRate = records[index + 1].rate;
+                    const currentRate = record.rate;
+                    const change = currentRate - previousRate;
+
+                    if (change > 0) {{
+                        changeIndicator = '<span class="trend-up">↗</span>';
+                        changeAmount = `<span class="change-up">+${{change.toFixed(2)}}</span>`;
+                    }} else if (change < 0) {{
+                        changeIndicator = '<span class="trend-down">↘</span>';
+                        changeAmount = `<span class="change-down">${{change.toFixed(2)}}</span>`;
+                    }} else {{
+                        changeIndicator = '<span class="trend-flat">→</span>';
+                        changeAmount = '<span class="change-flat">0.0000</span>';
+                    }}
+                }}
+
+                return `<tr><td>${{record.rate}} ${{changeIndicator}}</td><td>${{changeAmount}}</td><td>${{timestamp}}</td></tr>`;
             }}).join('');
 
             // Update record count
@@ -466,7 +546,30 @@ fn generate_html(history: &[RateRecord]) -> String {
                             const tbody = document.querySelector('table tbody');
                             const newRow = document.createElement('tr');
                             const timestamp = new Date(data.record.timestamp).toLocaleString('zh-CN');
-                            newRow.innerHTML = `<td>${{data.record.rate}}</td><td>${{timestamp}}</td>`;
+
+                            // Calculate change from previous first record
+                            let changeIndicator = '';
+                            let changeAmount = '';
+                            const firstRow = tbody.querySelector('tr:first-child');
+                            if (firstRow) {{
+                                const previousRateText = firstRow.querySelector('td:first-child').textContent;
+                                const previousRate = parseFloat(previousRateText.split(' ')[0]);
+                                const currentRate = data.record.rate;
+                                const change = currentRate - previousRate;
+
+                                if (change > 0) {{
+                                    changeIndicator = '<span class="trend-up">↗</span>';
+                                    changeAmount = `<span class="change-up">+${{change.toFixed(2)}}</span>`;
+                                }} else if (change < 0) {{
+                                    changeIndicator = '<span class="trend-down">↘</span>';
+                                    changeAmount = `<span class="change-down">${{change.toFixed(2)}}</span>`;
+                                }} else {{
+                                    changeIndicator = '<span class="trend-flat">→</span>';
+                                    changeAmount = '<span class="change-flat">0.0000</span>';
+                                }}
+                            }}
+
+                            newRow.innerHTML = `<td>${{data.record.rate}} ${{changeIndicator}}</td><td>${{changeAmount}}</td><td>${{timestamp}}</td>`;
                             tbody.insertBefore(newRow, tbody.firstChild);
 
                             // Remove last row if we have more than 100 records
@@ -554,6 +657,7 @@ fn generate_html(history: &[RateRecord]) -> String {
                 <thead>
                     <tr>
                         <th>汇率</th>
+                        <th>变化</th>
                         <th>时间</th>
                     </tr>
                 </thead>
