@@ -1,3 +1,8 @@
+use std::sync::{Arc, LazyLock, RwLock};
+use std::time::Duration;
+use std::{collections::VecDeque, io::Write};
+
+use askama::Template;
 use axum::{
     Router,
     extract::{State, WebSocketUpgrade, ws::WebSocket},
@@ -13,9 +18,6 @@ use reqwest::{
     header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, LazyLock, RwLock};
-use std::time::Duration;
-use std::{collections::VecDeque, io::Write};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tower::ServiceBuilder;
@@ -34,6 +36,20 @@ static RE: LazyLock<Regex> = LazyLock::new(|| {
 struct RateRecord {
     rate: String,
     timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct RateDisplay {
+    rate: String,
+    timestamp: DateTime<Utc>,
+    change_text: String,
+    change_indicator: String,
+}
+
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate {
+    history: Vec<RateDisplay>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,12 +151,12 @@ async fn fetch_sell_rate(
             if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
                 headers.insert(IF_NONE_MATCH, header_value);
             } else {
-                eprintln!("警告: ETag 格式无效: {}", &cache.etag);
+                eprintln!("*\n警告: ETag 格式无效: {}", &cache.etag);
             }
             if let Ok(header_value) = HeaderValue::from_str(&cache.last_modified) {
                 headers.insert(IF_MODIFIED_SINCE, header_value);
             } else {
-                eprintln!("警告: Last-Modified 格式无效: {}", &cache.last_modified);
+                eprintln!("*\n警告: Last-Modified 格式无效: {}", &cache.last_modified);
             }
         }
     }
@@ -148,7 +164,7 @@ async fn fetch_sell_rate(
     let response = match client.get(URL).headers(headers).send().await {
         Ok(resp) => resp,
         Err(e) => {
-            eprintln!("HTTP 请求失败: {:?}", e);
+            eprintln!("*\nHTTP 请求失败: {:?}", e);
             return None;
         }
     };
@@ -179,7 +195,7 @@ async fn fetch_sell_rate(
     let html = match response.text().await {
         Ok(content) => content,
         Err(e) => {
-            eprintln!("读取响应内容失败: {}", e);
+            eprintln!("*\n读取响应内容失败: {}", e);
             return None;
         }
     };
@@ -200,7 +216,7 @@ async fn fetch_sell_rate(
                 *cache = Some(cache_info);
             }
             _ => {
-                eprintln!("错误: 缺少必要的缓存信息");
+                eprintln!("*\n错误: 缺少必要的缓存信息");
             }
         }
         return match last_modified {
@@ -210,7 +226,7 @@ async fn fetch_sell_rate(
                     timestamp: timestamp.to_utc(),
                 }),
                 Err(_) => {
-                    eprintln!("错误: 无法解析最后修改时间，使用当前时间");
+                    eprintln!("*\n错误: 无法解析最后修改时间，使用当前时间");
                     Some(RateRecord {
                         rate: rate,
                         timestamp: Utc::now(),
@@ -218,7 +234,7 @@ async fn fetch_sell_rate(
                 }
             },
             None => {
-                eprintln!("错误: 缺少最后修改时间信息，使用当前时间");
+                eprintln!("*\n错误: 缺少最后修改时间信息，使用当前时间");
                 Some(RateRecord {
                     rate: rate,
                     timestamp: Utc::now(),
@@ -226,13 +242,13 @@ async fn fetch_sell_rate(
             }
         };
     } else {
-        eprintln!("错误: 在页面内容中找不到澳大利亚元汇率信息");
+        eprintln!("*\n错误: 在页面内容中找不到澳大利亚元汇率信息");
         return None;
     }
 }
 
 async fn rate_fetcher(state: AppState) {
-    let interval = Duration::from_secs(3);
+    let interval = Duration::from_secs(1);
     println!(
         "🚀 汇率获取器已启动，每{}秒获取一次数据",
         interval.as_secs()
@@ -242,8 +258,8 @@ async fn rate_fetcher(state: AppState) {
         .user_agent(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
         )
-        // .connect_timeout(Duration::from_secs(5))
-        // .read_timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(10))
         .build()
         .unwrap();
     let cache_info: Arc<RwLock<Option<CacheInfo>>> = Arc::new(RwLock::new(None));
@@ -362,8 +378,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
 async fn home_page(State(state): State<AppState>) -> impl IntoResponse {
     let history = state.get_history();
-    let html = generate_html(&history);
-    Html(html)
+    let display_history = prepare_rate_display(&history);
+    let template = IndexTemplate {
+        history: display_history,
+    };
+    match template.render() {
+        Ok(html) => Html(html),
+        Err(e) => {
+            eprintln!("Template render error: {}", e);
+            Html("<h1>Template Error</h1>".to_string())
+        }
+    }
 }
 
 async fn api_latest(State(state): State<AppState>) -> impl IntoResponse {
@@ -378,431 +403,45 @@ async fn api_history(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, axum::Json(history))
 }
 
-fn generate_html(history: &[RateRecord]) -> String {
-    let latest_display = match history.first() {
-        Some(rate) => format!(
-            "<div class='latest-rate'>
-                <h2>最新汇率</h2>
-                <div class='rate-value'>{}</div>
-                <div class='timestamp'>更新时间: {}</div>
-            </div>",
-            rate.rate,
-            rate.timestamp.format("%Y/%m/%d %H:%M:%S")
-        ),
-        None => "<div class='latest-rate'><h2>系统初始化中，暂无数据，请手动刷新。</h2></div>"
-            .to_string(),
-    };
-
-    let history_rows = history
+fn prepare_rate_display(history: &[RateRecord]) -> Vec<RateDisplay> {
+    history
         .iter()
         .enumerate()
         .map(|(index, record)| {
-            let (change_indicator, change_amount) = if index < history.len() - 1 {
+            let (change_text, change_indicator) = if index < history.len() - 1 {
                 let previous_rate: f64 = history[index + 1].rate.parse().unwrap_or(0.0);
                 let current_rate: f64 = record.rate.parse().unwrap_or(0.0);
                 let change = current_rate - previous_rate;
 
-                if change > 0.0 {
-                    (
-                        format!("<span class='trend-up'>↗</span>"),
-                        format!("<span class='change-up'>+{:.2}</span>", change),
-                    )
+                let indicator = if change > 0.0 {
+                    "<span class='trend-up'>↗</span>".to_string()
                 } else if change < 0.0 {
-                    (
-                        format!("<span class='trend-down'>↘</span>"),
-                        format!("<span class='change-down'>{:.2}</span>", change),
-                    )
+                    "<span class='trend-down'>↘</span>".to_string()
                 } else {
-                    (
-                        format!("<span class='trend-flat'>→</span>"),
-                        format!("<span class='change-flat'>0.0000</span>"),
-                    )
-                }
+                    "<span class='trend-flat'>→</span>".to_string()
+                };
+
+                let change_text = if change > 0.0 {
+                    format!("<span class='change-up'>+{:.2}</span>", change)
+                } else if change < 0.0 {
+                    format!("<span class='change-down'>{:.2}</span>", change)
+                } else {
+                    "<span class='change-flat'>0.0000</span>".to_string()
+                };
+
+                (change_text, indicator)
             } else {
                 (String::new(), String::new())
             };
 
-            format!(
-                "<tr>
-                    <td>{} {}</td>
-                    <td>{}</td>
-                    <td>{}</td>
-                </tr>",
-                record.rate,
+            RateDisplay {
+                rate: record.rate.clone(),
+                timestamp: record.timestamp,
+                change_text,
                 change_indicator,
-                change_amount,
-                record.timestamp.format("%Y/%m/%d %H:%M:%S")
-            )
+            }
         })
-        .collect::<Vec<_>>()
-        .join("");
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>澳元汇率监控</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }}
-        .container {{
-            background: white;
-            border-radius: 10px;
-            padding: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #333;
-            text-align: center;
-            margin-bottom: 30px;
-        }}
-        .latest-rate {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 10px;
-            text-align: center;
-            margin-bottom: 30px;
-        }}
-        .rate-value {{
-            font-size: 3em;
-            font-weight: bold;
-            margin: 20px 0;
-        }}
-        .timestamp {{
-            font-size: 0.9em;
-            opacity: 0.8;
-        }}
-        .history-section {{
-            margin-top: 30px;
-        }}
-        .history-section h2 {{
-            color: #333;
-            margin-bottom: 20px;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-        }}
-        th, td {{
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }}
-        th {{
-            background-color: #f8f9fa;
-            font-weight: bold;
-            color: #333;
-        }}
-        tr:hover {{
-            background-color: #f8f9fa;
-        }}
-        .connection-status {{
-            text-align: center;
-            margin-top: 20px;
-            padding: 10px;
-            border-radius: 5px;
-            font-weight: bold;
-        }}
-        .connected {{
-            background-color: #d4edda;
-            color: #155724;
-        }}
-        .disconnected {{
-            background-color: #f8d7da;
-            color: #721c24;
-        }}
-        .connecting {{
-            background-color: #fff3cd;
-            color: #856404;
-        }}
-        .api-links {{
-            margin-top: 20px;
-            text-align: center;
-        }}
-        .api-links a {{
-            color: #667eea;
-            text-decoration: none;
-            margin: 0 10px;
-        }}
-        .api-links a:hover {{
-            text-decoration: underline;
-        }}
-        .refresh-info {{
-            text-align: center;
-            margin-top: 20px;
-            color: #666;
-            font-size: 0.9em;
-        }}
-        .trend-up {{
-            color: #28a745;
-            font-weight: bold;
-            font-size: 1.2em;
-        }}
-        .trend-down {{
-            color: #dc3545;
-            font-weight: bold;
-            font-size: 1.2em;
-        }}
-        .trend-flat {{
-            color: #6c757d;
-            font-weight: bold;
-            font-size: 1.2em;
-        }}
-        .change-up {{
-            color: #28a745;
-            font-weight: bold;
-            font-size: 0.9em;
-        }}
-        .change-down {{
-            color: #dc3545;
-            font-weight: bold;
-            font-size: 0.9em;
-        }}
-        .change-flat {{
-            color: #6c757d;
-            font-weight: bold;
-            font-size: 0.9em;
-        }}
-        }}
-    </style>
-    <script>
-        let ws;
-        let reconnectTimeout;
-        let isReconnecting = false;
-
-        function updateConnectionStatus(status) {{
-            const statusElement = document.getElementById('connection-status');
-            statusElement.className = 'connection-status ' + status;
-
-            switch(status) {{
-                case 'connected':
-                    statusElement.textContent = '🟢 WebSocket 已连接 - 实时更新';
-                    break;
-                case 'disconnected':
-                    statusElement.textContent = '🔴 WebSocket 已断开 - 正在重连...';
-                    break;
-                case 'connecting':
-                    statusElement.textContent = '🟡 正在连接 WebSocket...';
-                    break;
-            }}
-        }}
-
-        function updateLatestRate(record) {{
-            document.querySelector('.rate-value').textContent = record.rate;
-            document.querySelector('.timestamp').textContent = '更新时间: ' + new Date(record.timestamp).toLocaleString('zh-CN');
-        }}
-
-        function updateHistory(records) {{
-            const tbody = document.querySelector('table tbody');
-            tbody.innerHTML = records.map((record, index) => {{
-                const timestamp = new Date(record.timestamp).toLocaleString('zh-CN');
-                let changeIndicator = '';
-                let changeAmount = '';
-
-                if (index < records.length - 1) {{
-                    const previousRate = records[index + 1].rate;
-                    const currentRate = record.rate;
-                    const change = currentRate - previousRate;
-
-                    if (change > 0) {{
-                        changeIndicator = '<span class="trend-up">↗</span>';
-                        changeAmount = `<span class="change-up">+${{change.toFixed(2)}}</span>`;
-                    }} else if (change < 0) {{
-                        changeIndicator = '<span class="trend-down">↘</span>';
-                        changeAmount = `<span class="change-down">${{change.toFixed(2)}}</span>`;
-                    }} else {{
-                        changeIndicator = '<span class="trend-flat">→</span>';
-                        changeAmount = '<span class="change-flat">0.0000</span>';
-                    }}
-                }}
-
-                return `<tr><td>${{record.rate}} ${{changeIndicator}}</td><td>${{changeAmount}}</td><td>${{timestamp}}</td></tr>`;
-            }}).join('');
-
-            // Update record count
-            document.querySelector('.history-section h2').textContent = `汇率历史 (最近${{records.length}}条记录)`;
-        }}
-
-        function connectWebSocket() {{
-            if (isReconnecting) return;
-
-            updateConnectionStatus('connecting');
-
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${{protocol}}//${{window.location.host}}/ws`;
-
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = function() {{
-                console.log('WebSocket connected');
-                updateConnectionStatus('connected');
-                isReconnecting = false;
-
-                // Clear any existing reconnect timeout
-                if (reconnectTimeout) {{
-                    clearTimeout(reconnectTimeout);
-                    reconnectTimeout = null;
-                }}
-            }};
-
-            ws.onmessage = function(event) {{
-                try {{
-                    const data = JSON.parse(event.data);
-
-                    switch(data.type) {{
-                        case 'rate_update':
-                            updateLatestRate(data.record);
-                            // Add the new record to the beginning of the history
-                            const tbody = document.querySelector('table tbody');
-                            const newRow = document.createElement('tr');
-                            const timestamp = new Date(data.record.timestamp).toLocaleString('zh-CN');
-
-                            // Calculate change from previous first record
-                            let changeIndicator = '';
-                            let changeAmount = '';
-                            const firstRow = tbody.querySelector('tr:first-child');
-                            if (firstRow) {{
-                                const previousRateText = firstRow.querySelector('td:first-child').textContent;
-                                const previousRate = parseFloat(previousRateText.split(' ')[0]);
-                                const currentRate = data.record.rate;
-                                const change = currentRate - previousRate;
-
-                                if (change > 0) {{
-                                    changeIndicator = '<span class="trend-up">↗</span>';
-                                    changeAmount = `<span class="change-up">+${{change.toFixed(2)}}</span>`;
-                                }} else if (change < 0) {{
-                                    changeIndicator = '<span class="trend-down">↘</span>';
-                                    changeAmount = `<span class="change-down">${{change.toFixed(2)}}</span>`;
-                                }} else {{
-                                    changeIndicator = '<span class="trend-flat">→</span>';
-                                    changeAmount = '<span class="change-flat">0.0000</span>';
-                                }}
-                            }}
-
-                            newRow.innerHTML = `<td>${{data.record.rate}} ${{changeIndicator}}</td><td>${{changeAmount}}</td><td>${{timestamp}}</td>`;
-                            tbody.insertBefore(newRow, tbody.firstChild);
-
-                            // Remove last row if we have more than 100 records
-                            const rows = tbody.querySelectorAll('tr');
-                            if (rows.length > 100) {{
-                                tbody.removeChild(rows[rows.length - 1]);
-                            }}
-
-                            // Update record count
-                            document.querySelector('.history-section h2').textContent = `汇率历史 (最近${{rows.length}}条记录)`;
-                            break;
-
-                        case 'history':
-                            updateHistory(data.records);
-                            if (data.records.length > 0) {{
-                                updateLatestRate(data.records[0]);
-                            }}
-                            break;
-
-                        case 'pong':
-                            console.log('Received pong');
-                            break;
-                    }}
-                }} catch (error) {{
-                    console.error('Error parsing WebSocket message:', error);
-                }}
-            }};
-
-            ws.onclose = function() {{
-                console.log('WebSocket disconnected');
-                updateConnectionStatus('disconnected');
-
-                // Attempt to reconnect after 3 seconds
-                if (!isReconnecting) {{
-                    isReconnecting = true;
-                    reconnectTimeout = setTimeout(() => {{
-                        isReconnecting = false;
-                        connectWebSocket();
-                    }}, 3000);
-                }}
-            }};
-
-            ws.onerror = function(error) {{
-                console.error('WebSocket error:', error);
-                updateConnectionStatus('disconnected');
-            }};
-        }}
-
-        // Send periodic ping to keep connection alive
-        function sendPing() {{
-            if (ws && ws.readyState === WebSocket.OPEN) {{
-                ws.send(JSON.stringify({{type: 'ping'}}));
-            }}
-        }}
-
-        // Connect when page loads
-        document.addEventListener('DOMContentLoaded', function() {{
-            connectWebSocket();
-
-            // Send ping every 30 seconds to keep connection alive
-            setInterval(sendPing, 30000);
-        }});
-
-        // Handle page visibility changes
-        document.addEventListener('visibilitychange', function() {{
-            if (!document.hidden && ws && ws.readyState === WebSocket.CLOSED) {{
-                connectWebSocket();
-            }}
-        }});
-    </script>
-</head>
-<body>
-    <div class="container">
-        <h1>澳元汇率监控 (AUD/CNY)</h1>
-
-        <div id="connection-status" class="connection-status connecting">
-            🟡 正在连接 WebSocket...
-        </div>
-
-        {}
-
-        <div class="history-section">
-            <h2>汇率历史 (最近{}条记录)</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>汇率</th>
-                        <th>变化</th>
-                        <th>时间</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {}
-                </tbody>
-            </table>
-        </div>
-
-        <div class="api-links">
-            <strong>API 接口:</strong>
-            <a href="/api/latest">最新汇率</a>
-            <a href="/api/history">完整历史</a>
-            <a href="/ws">WebSocket 连接</a>
-        </div>
-
-        <div class="refresh-info">
-            实时 WebSocket 更新 | 数据每3秒更新一次
-        </div>
-    </div>
-</body>
-</html>"#,
-        latest_display,
-        history.len(),
-        history_rows
-    )
+        .collect()
 }
 
 #[tokio::main]
