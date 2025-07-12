@@ -5,14 +5,17 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Utc};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use regex::Regex;
-use reqwest::Client;
+use reqwest::{
+    Client,
+    header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
+};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
+use std::{collections::VecDeque, io::Write};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tower::ServiceBuilder;
@@ -30,7 +33,13 @@ static RE: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RateRecord {
     rate: String,
-    timestamp: DateTime<Local>,
+    timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct CacheInfo {
+    etag: String,
+    last_modified: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,7 +58,6 @@ enum WebSocketMessage {
 #[derive(Clone)]
 struct AppState {
     rate_history: Arc<RwLock<VecDeque<RateRecord>>>,
-    client: Client,
     broadcast_tx: broadcast::Sender<WebSocketMessage>,
 }
 
@@ -59,37 +67,39 @@ impl AppState {
 
         Self {
             rate_history: Arc::new(RwLock::new(VecDeque::new())),
-            client: Client::builder().user_agent("Mozilla/5.0").build().unwrap(),
             broadcast_tx,
         }
     }
 
-    fn add_rate(&self, rate: String) {
-        let mut history = self.rate_history.write().unwrap();
+    fn add_rate(&self, record: RateRecord) {
+        {
+            let history = self.rate_history.read().unwrap();
 
-        let record = RateRecord {
-            rate,
-            timestamp: Local::now(),
-        };
-
-        // Check if this rate is different from the last one
-        if let Some(last) = history.back() {
-            if last.rate == record.rate {
-                return; // Skip if rate hasn't changed
+            if let Some(last_record) = history.back() {
+                if last_record.timestamp == record.timestamp {
+                    let mut stdout = std::io::stdout();
+                    stdout.write(b"+").unwrap();
+                    stdout.flush().unwrap();
+                    return;
+                }
             }
         }
 
         println!(
-            "[{}] 澳元汇卖价更新: {}",
+            "+\n[{}] 澳元汇卖价: {}",
             record.timestamp.format("%Y-%m-%d %H:%M:%S"),
             record.rate
         );
 
-        history.push_back(record.clone());
+        {
+            let mut history = self.rate_history.write().unwrap();
 
-        // Keep only the last 100 records
-        while history.len() > 100 {
-            history.pop_front();
+            history.push_back(record.clone());
+
+            // Keep only the last 100 records
+            while history.len() > 100 {
+                history.pop_front();
+            }
         }
 
         // Broadcast the update to all connected WebSocket clients
@@ -112,30 +122,139 @@ impl AppState {
     }
 }
 
-async fn fetch_sell_rate(client: &Client) -> Option<String> {
-    let html = client.get(URL).send().await.ok()?.text().await.ok()?;
+async fn fetch_sell_rate(
+    client: &Client,
+    cache_info: &Arc<RwLock<Option<CacheInfo>>>,
+) -> Option<RateRecord> {
+    let mut headers = HeaderMap::new();
+    // 添加缓存头部
+    {
+        let cache = cache_info.read().unwrap();
+        if let Some(cache) = &*cache {
+            // println!("使用缓存：{:?}", &cache);
+            if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
+                headers.insert(IF_NONE_MATCH, header_value);
+            } else {
+                eprintln!("警告: ETag 格式无效: {}", &cache.etag);
+            }
+            if let Ok(header_value) = HeaderValue::from_str(&cache.last_modified) {
+                headers.insert(IF_MODIFIED_SINCE, header_value);
+            } else {
+                eprintln!("警告: Last-Modified 格式无效: {}", &cache.last_modified);
+            }
+        }
+    }
+
+    let response = match client.get(URL).headers(headers).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("HTTP 请求失败: {:?}", e);
+            return None;
+        }
+    };
+
+    let status = response.status().as_u16();
+    // println!("HTTP 响应状态: {}", status);
+
+    // 检查是否返回304 Not Modified，跳过
+    if status == 304 {
+        let mut stdout = std::io::stdout();
+        stdout.write(b".").unwrap();
+        stdout.flush().unwrap();
+        return None;
+    }
+
+    // 更新缓存信息
+    let etag = response
+        .headers()
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let last_modified = response
+        .headers()
+        .get(LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let html = match response.text().await {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("读取响应内容失败: {}", e);
+            return None;
+        }
+    };
 
     // 匹配 "澳大利亚元" 行后的两个 <td>，第2个是卖出价
     if let Some(caps) = &RE.captures(&html) {
-        return Some(caps.get(2)?.as_str().trim().to_string()); // 卖出价
+        let rate = caps.get(2)?.as_str().trim().to_string();
+        // println!("成功提取汇率: {}", rate);
+        // 更新缓存
+        match (etag, &last_modified) {
+            (Some(etag), Some(last_modified)) => {
+                let mut cache = cache_info.write().unwrap();
+                let cache_info = CacheInfo {
+                    etag: etag,
+                    last_modified: last_modified.clone(),
+                };
+                // println!("{:?}", cache_info);
+                *cache = Some(cache_info);
+            }
+            _ => {
+                eprintln!("错误: 缺少必要的缓存信息");
+            }
+        }
+        return match last_modified {
+            Some(last_modified) => match DateTime::parse_from_rfc2822(&last_modified) {
+                Ok(timestamp) => Some(RateRecord {
+                    rate: rate,
+                    timestamp: timestamp.to_utc(),
+                }),
+                Err(_) => {
+                    eprintln!("错误: 无法解析最后修改时间，使用当前时间");
+                    Some(RateRecord {
+                        rate: rate,
+                        timestamp: Utc::now(),
+                    })
+                }
+            },
+            None => {
+                eprintln!("错误: 缺少最后修改时间信息，使用当前时间");
+                Some(RateRecord {
+                    rate: rate,
+                    timestamp: Utc::now(),
+                })
+            }
+        };
+    } else {
+        eprintln!("错误: 在页面内容中找不到澳大利亚元汇率信息");
+        return None;
     }
-
-    None
 }
 
 async fn rate_fetcher(state: AppState) {
     let interval = Duration::from_secs(3);
+    println!(
+        "🚀 汇率获取器已启动，每{}秒获取一次数据",
+        interval.as_secs()
+    );
+
+    let client = Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
+        )
+        // .connect_timeout(Duration::from_secs(5))
+        // .read_timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let cache_info: Arc<RwLock<Option<CacheInfo>>> = Arc::new(RwLock::new(None));
 
     loop {
-        match fetch_sell_rate(&state.client).await {
+        match fetch_sell_rate(&client, &cache_info).await {
             Some(current_rate) => {
                 state.add_rate(current_rate);
             }
-            None => {
-                eprintln!("无法获取牌价！");
-            }
+            None => (),
         }
-
         sleep(interval).await;
     }
 }
@@ -712,7 +831,6 @@ async fn main() {
 
     println!("🚀 Server running on http://127.0.0.1:3000");
     println!("🔌 WebSocket endpoint: ws://127.0.0.1:3000/ws");
-    println!("📊 Rate fetcher starting...");
 
     axum::serve(listener, app).await.unwrap();
 }
