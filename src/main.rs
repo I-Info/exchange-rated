@@ -18,10 +18,16 @@ use reqwest::{
     header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::{QueryBuilder, Row, sqlite::SqlitePool};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+
+#[cfg(not(unix))]
+use tokio::signal;
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 
 static URL: &'static str = "https://www.boc.cn/sourcedb/whpj/mfx_1620.html";
 
@@ -75,19 +81,21 @@ enum WebSocketMessage {
 struct AppState {
     rate_history: Arc<RwLock<VecDeque<RateRecord>>>,
     broadcast_tx: broadcast::Sender<WebSocketMessage>,
+    db_pool: SqlitePool,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(db_pool: SqlitePool) -> Self {
         let (broadcast_tx, _) = broadcast::channel(1000);
 
         Self {
             rate_history: Arc::new(RwLock::new(VecDeque::new())),
             broadcast_tx,
+            db_pool,
         }
     }
 
-    fn add_rate(&self, record: RateRecord) {
+    fn add_rate(&self, record: RateRecord) -> bool {
         {
             let history = self.rate_history.read().unwrap();
 
@@ -96,7 +104,7 @@ impl AppState {
                     let mut stdout = std::io::stdout();
                     stdout.write(b"+").unwrap();
                     stdout.flush().unwrap();
-                    return;
+                    return false;
                 }
             }
         }
@@ -107,20 +115,19 @@ impl AppState {
             record.rate
         );
 
-        {
+        let should_persist = {
             let mut history = self.rate_history.write().unwrap();
-
             history.push_back(record.clone());
 
-            // Keep only the last 100 records
-            while history.len() > 100 {
-                history.pop_front();
-            }
-        }
+            // Check if we need to persist (when reaching 150 records)
+            history.len() >= 150
+        };
 
         // Broadcast the update to all connected WebSocket clients
         let message = WebSocketMessage::RateUpdate { record };
         let _ = self.broadcast_tx.send(message);
+
+        should_persist
     }
 
     fn get_latest_rate(&self) -> Option<RateRecord> {
@@ -135,6 +142,59 @@ impl AppState {
 
     fn subscribe(&self) -> broadcast::Receiver<WebSocketMessage> {
         self.broadcast_tx.subscribe()
+    }
+
+    async fn persist_to_db(&self) -> Result<(), sqlx::Error> {
+        let records_to_persist = {
+            let history = self.rate_history.read().unwrap();
+            history.iter().cloned().collect::<Vec<_>>()
+        };
+
+        if records_to_persist.is_empty() {
+            return Ok(());
+        }
+
+        // Use QueryBuilder to batch insert
+        let mut query_builder: QueryBuilder<sqlx::Sqlite> =
+            QueryBuilder::new("INSERT OR IGNORE INTO rate_records (rate, timestamp) ");
+
+        query_builder.push_values(&records_to_persist, |mut b, record| {
+            b.push_bind(&record.rate).push_bind(record.timestamp);
+        });
+
+        let result = query_builder.build().execute(&self.db_pool).await?;
+        println!("*\n已持久化 {} 条记录到数据库", result.rows_affected());
+
+        // Keep only the latest 75 records in memory
+        {
+            let mut history = self.rate_history.write().unwrap();
+            while history.len() > 75 {
+                history.pop_front();
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn load_from_db(&self) -> Result<(), sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT rate, timestamp FROM rate_records ORDER BY timestamp DESC LIMIT 75",
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut history = self.rate_history.write().unwrap();
+        history.clear();
+
+        for row in rows.into_iter().rev() {
+            let rate: String = row.get("rate");
+            let timestamp: DateTime<Utc> = row.get("timestamp");
+
+            history.push_back(RateRecord { rate, timestamp });
+        }
+
+        println!("📚 从数据库加载了 {} 条历史记录", history.len());
+        Ok(())
     }
 }
 
@@ -248,10 +308,10 @@ async fn fetch_sell_rate(
 }
 
 async fn rate_fetcher(state: AppState) {
-    let interval = Duration::from_secs(1);
+    let fetch_interval = Duration::from_secs(1);
     println!(
         "🚀 汇率获取器已启动，每{}秒获取一次数据",
-        interval.as_secs()
+        fetch_interval.as_secs()
     );
 
     let client = Client::builder()
@@ -267,11 +327,35 @@ async fn rate_fetcher(state: AppState) {
     loop {
         match fetch_sell_rate(&client, &cache_info).await {
             Some(current_rate) => {
-                state.add_rate(current_rate);
+                let should_persist = state.add_rate(current_rate);
+                if should_persist {
+                    if let Err(e) = state.persist_to_db().await {
+                        eprintln!("❌ 持久化失败: {}", e);
+                    }
+                }
             }
             None => (),
         }
-        sleep(interval).await;
+        sleep(fetch_interval).await;
+    }
+}
+
+async fn periodic_persister(state: AppState) {
+    let persist_interval = Duration::from_secs(300); // 5 minutes
+    println!("⏰ 定时持久化器已启动，每5分钟执行一次");
+
+    loop {
+        sleep(persist_interval).await;
+        let history_len = {
+            let history = state.rate_history.read().unwrap();
+            history.len()
+        };
+
+        if history_len > 0 {
+            if let Err(e) = state.persist_to_db().await {
+                eprintln!("❌ 定时持久化失败: {}", e);
+            }
+        }
     }
 }
 
@@ -426,7 +510,7 @@ fn prepare_rate_display(history: &[RateRecord]) -> Vec<RateDisplay> {
                 } else if change < 0.0 {
                     format!("<span class='change-down'>{:.2}</span>", change)
                 } else {
-                    "<span class='change-flat'>0.0000</span>".to_string()
+                    "<span class='change-flat'>0.00</span>".to_string()
                 };
 
                 (change_text, indicator)
@@ -444,9 +528,46 @@ fn prepare_rate_display(history: &[RateRecord]) -> Vec<RateDisplay> {
         .collect()
 }
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal(SignalKind::terminate()).unwrap();
+        let mut sigint = signal(SignalKind::interrupt()).unwrap();
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                println!("\nReceived SIGTERM (systemd stop/restart)");
+            }
+            _ = sigint.recv() => {
+                println!("\nReceived SIGINT (Ctrl+C)");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // fallback for non-UNIX systems
+        signal::ctrl_c().await.unwrap();
+        println!("Received Ctrl+C");
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let state = AppState::new();
+    // Initialize database
+    let db = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:rates.db".to_string());
+    println!("Database URL: {}", db);
+    let db_pool = SqlitePool::connect(&db).await.unwrap();
+
+    // Run migrations
+    sqlx::migrate!("./migrations").run(&db_pool).await.unwrap();
+
+    let state = AppState::new(db_pool);
+
+    // Load existing data from database
+    if let Err(e) = state.load_from_db().await {
+        eprintln!("⚠️ 加载历史数据失败: {}", e);
+    }
 
     // Start the rate fetcher in the background
     let fetcher_state = state.clone();
@@ -454,22 +575,34 @@ async fn main() {
         rate_fetcher(fetcher_state).await;
     });
 
-    // Build the router
-    let app = Router::new()
-        .route("/", get(home_page))
-        .route("/ws", get(websocket_handler))
-        .route("/api/latest", get(api_latest))
-        .route("/api/history", get(api_history))
-        .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
-        .with_state(state);
+    // Start the periodic persister in the background
+    let persister_state = state.clone();
+    tokio::spawn(async move {
+        periodic_persister(persister_state).await;
+    });
 
-    // Start the server
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
+    let server_state = state.clone();
+    tokio::spawn(async move {
+        // Build the router
+        let app = Router::new()
+            .route("/", get(home_page))
+            .route("/ws", get(websocket_handler))
+            .route("/api/latest", get(api_latest))
+            .route("/api/history", get(api_history))
+            .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
+            .with_state(server_state);
 
-    println!("🚀 Server running on http://127.0.0.1:3000");
-    println!("🔌 WebSocket endpoint: ws://127.0.0.1:3000/ws");
+        // Start the server
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+            .await
+            .unwrap();
 
-    axum::serve(listener, app).await.unwrap();
+        println!("🚀 Server running on http://127.0.0.1:3000");
+        println!("🔌 WebSocket endpoint: ws://127.0.0.1:3000/ws");
+
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    wait_for_shutdown_signal().await;
+    state.persist_to_db().await.unwrap();
 }

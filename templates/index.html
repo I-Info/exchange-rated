@@ -195,7 +195,7 @@
                                 changeIndicator =
                                     '<span class="trend-flat">→</span>';
                                 changeAmount =
-                                    '<span class="change-flat">0.0000</span>';
+                                    '<span class="change-flat">0.00</span>';
                             }
                         }
 
@@ -281,9 +281,9 @@
                                 newRow.innerHTML = `<td>${data.record.rate} ${changeIndicator}</td><td>${changeAmount}</td><td>${timestamp}</td>`;
                                 tbody.insertBefore(newRow, tbody.firstChild);
 
-                                // Remove last row if we have more than 100 records
+                                // Remove last row if we have more than 200 records
                                 const rows = tbody.querySelectorAll("tr");
-                                if (rows.length > 100) {
+                                if (rows.length > 200) {
                                     tbody.removeChild(rows[rows.length - 1]);
                                 }
 

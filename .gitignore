@@ -1,1 +1,5 @@
 /target
+rates.db
+.env
+*.db
+*.db-journal
