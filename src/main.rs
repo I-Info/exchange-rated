@@ -341,8 +341,11 @@ async fn rate_fetcher(state: AppState) {
 }
 
 async fn periodic_persister(state: AppState) {
-    let persist_interval = Duration::from_secs(300); // 5 minutes
-    println!("⏰ 定时持久化器已启动，每5分钟执行一次");
+    let persist_interval = Duration::from_secs(1800);
+    println!(
+        "⏰ 定时持久化器已启动，每{}s执行一次",
+        persist_interval.as_secs()
+    );
 
     loop {
         sleep(persist_interval).await;

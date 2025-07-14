@@ -30,7 +30,6 @@ CREATE TABLE rate_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rate TEXT NOT NULL,
     timestamp DATETIME NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX idx_rate_records_timestamp ON rate_records(timestamp);
@@ -39,8 +38,7 @@ CREATE UNIQUE INDEX idx_rate_records_timestamp ON rate_records(timestamp);
 ## 安装和运行
 
 ### 前置要求
-- Rust 1.70 或更高版本
-- SQLite 3
+- Rust 1.80 或更高版本
 
 ### 克隆项目
 ```bash
@@ -111,21 +109,6 @@ rated/
 - `+` - 新汇率数据获取成功
 - `.` - HTTP 304 响应（数据未更新）
 - `*` - 错误或警告信息
-- `✅` - 数据持久化成功
-- `📚` - 数据库数据加载完成
-- `⏰` - 定时任务启动
-
-## 开发说明
-
-### 添加新的持久化功能
-1. 在 `migrations/` 目录下创建新的 SQL 迁移文件
-2. 更新 `AppState` 结构体和相关方法
-3. 使用 `sqlx::migrate!()` 宏自动运行迁移
-
-### 自定义持久化策略
-- 修改 `PERSISTENCE_INTERVAL` 常量调整定时持久化间隔
-- 修改 `add_rate()` 方法中的阈值条件
-- 调整 `persist_to_db()` 方法中的内存保留数量
 
 ## 许可证
 
