@@ -135,11 +135,52 @@
                 font-weight: bold;
                 font-size: 0.9em;
             }
+            .chart-section {
+                margin: 30px 0;
+            }
+            .chart-section h2 {
+                color: #333;
+                margin-bottom: 20px;
+                text-align: center;
+            }
+            .chart-container {
+                position: relative;
+                height: 400px;
+                background: white;
+                border-radius: 10px;
+                padding: 20px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            }
+            .chart-controls {
+                text-align: center;
+                margin-bottom: 20px;
+            }
+            .chart-controls button {
+                background: #667eea;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                margin: 0 5px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .chart-controls button:hover {
+                background: #5a6fd8;
+            }
+            .chart-controls button.active {
+                background: #764ba2;
+            }
         </style>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
         <script>
             let ws;
             let reconnectTimeout;
             let isReconnecting = false;
+            let rateChart;
+            let chartData = [];
+            let chartTimeRange = 50; // Default to show last 50 records
 
             function updateConnectionStatus(status) {
                 const statusElement =
@@ -238,6 +279,14 @@
                         switch (data.type) {
                             case "rate_update":
                                 updateLatestRate(data.record);
+
+                                // Add to chart data
+                                chartData.unshift(data.record);
+                                if (chartData.length > 500) {
+                                    chartData = chartData.slice(0, 500);
+                                }
+                                updateChart(chartData);
+
                                 // Add the new record to the beginning of the history
                                 const tbody =
                                     document.querySelector("table tbody");
@@ -274,7 +323,7 @@
                                         changeIndicator =
                                             '<span class="trend-flat">→</span>';
                                         changeAmount =
-                                            '<span class="change-flat">0.0000</span>';
+                                            '<span class="change-flat">0.00</span>';
                                     }
                                 }
 
@@ -299,6 +348,10 @@
                                 if (data.records.length > 0) {
                                     updateLatestRate(data.records[0]);
                                 }
+
+                                // Initialize chart data
+                                chartData = data.records.slice();
+                                updateChart(chartData);
                                 break;
 
                             case "pong":
@@ -333,6 +386,114 @@
                 };
             }
 
+            // Chart functions
+            function initChart() {
+                const ctx = document
+                    .getElementById("rateChart")
+                    .getContext("2d");
+                rateChart = new Chart(ctx, {
+                    type: "line",
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: "AUD/CNY",
+                                data: [],
+                                borderColor: "#667eea",
+                                backgroundColor: "rgba(102, 126, 234, 0.1)",
+                                borderWidth: 2,
+                                fill: true,
+                                tension: 0.1,
+                                pointRadius: 3,
+                                pointHoverRadius: 5,
+                                pointBackgroundColor: "#667eea",
+                                pointBorderColor: "#ffffff",
+                                pointBorderWidth: 2,
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                type: "time",
+                                display: true,
+                                title: {
+                                    display: false,
+                                    text: "时间",
+                                },
+                                time: {
+                                    displayFormats: {
+                                        minute: "HH:mm",
+                                        hour: "HH:mm",
+                                        day: "MM/dd HH:mm",
+                                    },
+                                    tooltipFormat: "yyyy/MM/dd HH:mm:ss",
+                                },
+                                ticks: {
+                                    maxTicksLimit: 10,
+                                    source: "auto",
+                                },
+                            },
+                            y: {
+                                display: true,
+                                title: {
+                                    display: false,
+                                    text: "汇率",
+                                },
+                                beginAtZero: false,
+                            },
+                        },
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: "top",
+                            },
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: "index",
+                        },
+                    },
+                });
+            }
+
+            function updateChart(data) {
+                if (!rateChart) return;
+
+                // Get the data for the current time range
+                const displayData = data.slice(0, chartTimeRange);
+
+                // Prepare data points with time as x and rate as y (reverse to show oldest first)
+                const chartPoints = displayData.reverse().map((record) => ({
+                    x: new Date(record.timestamp),
+                    y: record.rate,
+                }));
+
+                // Update chart data
+                rateChart.data.labels = [];
+                rateChart.data.datasets[0].data = chartPoints;
+                rateChart.update("none"); // No animation for real-time updates
+            }
+
+            function setChartTimeRange(range) {
+                chartTimeRange = range;
+
+                // Update button states
+                document
+                    .querySelectorAll(".chart-controls button")
+                    .forEach((btn) => {
+                        btn.classList.remove("active");
+                    });
+                document
+                    .querySelector(`button[data-range="${range}"]`)
+                    .classList.add("active");
+
+                // Update chart
+                updateChart(chartData);
+            }
+
             // Send periodic ping to keep connection alive
             function sendPing() {
                 if (ws && ws.readyState === WebSocket.OPEN) {
@@ -342,6 +503,7 @@
 
             // Connect when page loads
             document.addEventListener("DOMContentLoaded", function () {
+                initChart();
                 connectWebSocket();
 
                 // Send ping every 30 seconds to keep connection alive
@@ -382,6 +544,28 @@
                 <h2>系统初始化中，暂无数据，请手动刷新。</h2>
             </div>
             {% endif %}
+
+            <div class="chart-section">
+                <h2>汇率走势图</h2>
+                <div class="chart-controls">
+                    <button data-range="20" onclick="setChartTimeRange(20)">
+                        最近20条
+                    </button>
+                    <button
+                        data-range="75"
+                        onclick="setChartTimeRange(75)"
+                        class="active"
+                    >
+                        最近75条
+                    </button>
+                    <button data-range="150" onclick="setChartTimeRange(150)">
+                        最近150条
+                    </button>
+                </div>
+                <div class="chart-container">
+                    <canvas id="rateChart"></canvas>
+                </div>
+            </div>
 
             <div class="history-section">
                 <h2>汇率历史 (最近{{ history.len() }}条记录)</h2>
