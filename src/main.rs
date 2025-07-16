@@ -165,11 +165,12 @@ impl AppState {
         let result = query_builder.build().execute(&self.db_pool).await?;
         println!("*\n已持久化 {} 条记录到数据库", result.rows_affected());
 
-        // Keep only the latest 75 records in memory
+        // Keep only the latest 100 records in memory
         {
             let mut history = self.rate_history.write().unwrap();
-            while history.len() > 75 {
-                history.pop_front();
+            let len = history.len();
+            if len > 100 {
+                history.drain(..len - 100);
             }
         }
 
@@ -178,7 +179,7 @@ impl AppState {
 
     async fn load_from_db(&self) -> Result<(), sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT rate, timestamp FROM rate_records ORDER BY timestamp DESC LIMIT 75",
+            "SELECT rate, timestamp FROM rate_records ORDER BY timestamp DESC LIMIT 100",
         )
         .fetch_all(&self.db_pool)
         .await?;

@@ -147,9 +147,6 @@
                 position: relative;
                 height: 400px;
                 background: white;
-                border-radius: 10px;
-                padding: 20px;
-                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             }
             .chart-controls {
                 text-align: center;
@@ -160,7 +157,7 @@
                 color: white;
                 border: none;
                 padding: 8px 16px;
-                margin: 0 5px;
+                margin: 0;
                 border-radius: 5px;
                 cursor: pointer;
                 font-size: 14px;
@@ -506,6 +503,11 @@
                 initChart();
                 connectWebSocket();
 
+                const iframe = document.getElementById("googlefinance");
+                setInterval(() => {
+                    iframe.src = iframe.src;
+                }, 10000);
+
                 // Send ping every 30 seconds to keep connection alive
                 setInterval(sendPing, 30000);
             });
@@ -518,6 +520,13 @@
                     ws.readyState === WebSocket.CLOSED
                 ) {
                     connectWebSocket();
+                }
+            });
+
+            // Handle page unload event to close WebSocket connection
+            window.addEventListener("beforeunload", function () {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.close();
                 }
             });
         </script>
@@ -544,22 +553,52 @@
                 <h2>系统初始化中，暂无数据，请手动刷新。</h2>
             </div>
             {% endif %}
-
+            <div style="text-align: center">
+                <strong style="margin: 0 auto">市场参考价(每5分钟更新):</strong>
+                <div
+                    style="
+                        position: relative;
+                        width: 140px;
+                        height: 65px;
+                        margin: 0 auto;
+                    "
+                >
+                    <iframe
+                        id="googlefinance"
+                        width="140"
+                        height="65"
+                        frameborder="0"
+                        src="https://docs.google.com/spreadsheets/d/e/2PACX-1vRSCc6XmpS80VqDZArQasgFuU_p0oA6RchdVBtU3urq1lli9lf3nDN7rh0rb_tA85Gffm-iTjDz3h5f/pubhtml?gid=0&amp;single=true&amp;widget=true&amp;headers=false"
+                    ></iframe>
+                    <a
+                        href="https://www.google.com/finance/quote/AUD-CNY"
+                        target="_blank"
+                        style="
+                            position: absolute;
+                            top: 0;
+                            left: 0;
+                            width: 100%;
+                            height: 100%;
+                            z-index: 10;
+                            display: block;
+                        "
+                    ></a>
+                </div>
+            </div>
             <div class="chart-section">
                 <h2>汇率走势图</h2>
                 <div class="chart-controls">
-                    <button data-range="20" onclick="setChartTimeRange(20)">
-                        最近20条
+                    <button data-range="25" onclick="setChartTimeRange(25)">
+                        最近25条
                     </button>
-                    <button
-                        data-range="75"
-                        onclick="setChartTimeRange(75)"
-                        class="active"
-                    >
-                        最近75条
+                    <button data-range="50" onclick="setChartTimeRange(50)">
+                        最近50条
                     </button>
-                    <button data-range="150" onclick="setChartTimeRange(150)">
-                        最近150条
+                    <button data-range="100" onclick="setChartTimeRange(100)">
+                        最近100条
+                    </button>
+                    <button data-range="175" onclick="setChartTimeRange(175)">
+                        最近175条
                     </button>
                 </div>
                 <div class="chart-container">
@@ -607,7 +646,7 @@
             </div>
 
             <div class="refresh-info">
-                实时 WebSocket 更新 | 数据每3秒更新一次
+                实时 WebSocket 更新 | 后台数据每秒更新
             </div>
         </div>
     </body>
