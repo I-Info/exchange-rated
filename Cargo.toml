@@ -19,3 +19,4 @@ tower-http = { version = "0.6.6", features = ["cors"] }
 futures-util = "0.3"
 askama = "0.14.0"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono"] }
+rand = "0.9.1"

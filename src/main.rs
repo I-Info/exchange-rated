@@ -15,7 +15,7 @@ use futures_util::{sink::SinkExt, stream::StreamExt};
 use regex::Regex;
 use reqwest::{
     Client,
-    header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
+    header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, sqlite::SqlitePool};
@@ -60,7 +60,7 @@ struct IndexTemplate {
 
 #[derive(Clone, Debug)]
 struct CacheInfo {
-    etag: String,
+    // etag: String,
     last_modified: String,
 }
 
@@ -209,11 +209,11 @@ async fn fetch_sell_rate(
         let cache = cache_info.read().unwrap();
         if let Some(cache) = &*cache {
             // println!("使用缓存：{:?}", &cache);
-            if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
-                headers.insert(IF_NONE_MATCH, header_value);
-            } else {
-                eprintln!("*\n警告: ETag 格式无效: {}", &cache.etag);
-            }
+            // if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
+            //     headers.insert(IF_NONE_MATCH, header_value);
+            // } else {
+            //     eprintln!("*\n警告: ETag 格式无效: {}", &cache.etag);
+            // }
             if let Ok(header_value) = HeaderValue::from_str(&cache.last_modified) {
                 headers.insert(IF_MODIFIED_SINCE, header_value);
             } else {
@@ -242,11 +242,11 @@ async fn fetch_sell_rate(
     }
 
     // 更新缓存信息
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    // let etag = response
+    //     .headers()
+    //     .get(ETAG)
+    //     .and_then(|v| v.to_str().ok())
+    //     .map(|s| s.to_string());
     let last_modified = response
         .headers()
         .get(LAST_MODIFIED)
@@ -266,11 +266,11 @@ async fn fetch_sell_rate(
         let rate = caps.get(2)?.as_str().trim().to_string();
         // println!("成功提取汇率: {}", rate);
         // 更新缓存
-        match (etag, &last_modified) {
-            (Some(etag), Some(last_modified)) => {
+        match &last_modified {
+            Some(last_modified) => {
                 let mut cache = cache_info.write().unwrap();
                 let cache_info = CacheInfo {
-                    etag: etag,
+                    // etag: etag,
                     last_modified: last_modified.clone(),
                 };
                 // println!("{:?}", cache_info);
@@ -309,11 +309,7 @@ async fn fetch_sell_rate(
 }
 
 async fn rate_fetcher(state: AppState) {
-    let fetch_interval = Duration::from_secs(1);
-    println!(
-        "🚀 汇率获取器已启动，每{}秒获取一次数据",
-        fetch_interval.as_secs()
-    );
+    println!("🚀 汇率获取器已启动，每1-5秒获取一次数据");
 
     let client = Client::builder()
         .user_agent(
@@ -337,14 +333,14 @@ async fn rate_fetcher(state: AppState) {
             }
             None => (),
         }
-        sleep(fetch_interval).await;
+        sleep(Duration::from_millis(rand::random_range(1000..5000))).await;
     }
 }
 
 async fn periodic_persister(state: AppState) {
     let persist_interval = Duration::from_secs(1800);
     println!(
-        "⏰ 定时持久化器已启动，每{}s执行一次",
+        "⏰ 持久化定时器已启动，每{}s执行一次",
         persist_interval.as_secs()
     );
 
