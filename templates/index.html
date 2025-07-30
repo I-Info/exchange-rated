@@ -168,6 +168,22 @@
             .chart-controls button.active {
                 background: #764ba2;
             }
+            .github-link {
+                text-align: center;
+                margin-top: 20px;
+                padding-top: 20px;
+                border-top: 1px solid #eee;
+            }
+            .github-link a {
+                color: #666;
+                text-decoration: none;
+                font-size: 14px;
+                transition: all 0.3s ease;
+            }
+            .github-link a:hover {
+                color: #333;
+                text-decoration: underline;
+            }
         </style>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
@@ -204,6 +220,9 @@
                 document.querySelector(".timestamp").textContent =
                     "更新时间: " +
                     new Date(record.timestamp).toLocaleString("zh-CN");
+
+                // Update page title with current rate
+                document.title = `澳元汇率监控 - ${record.rate}`;
             }
 
             function updateHistory(records) {
@@ -504,6 +523,12 @@
                 initChart();
                 connectWebSocket();
 
+                // Update title with initial rate if available
+                const initialRate = document.querySelector(".rate-value");
+                if (initialRate && initialRate.textContent.trim()) {
+                    document.title = `澳元汇率监控 - ${initialRate.textContent.trim()}`;
+                }
+
                 const iframe = document.getElementById("googlefinance");
                 setInterval(() => {
                     iframe.src = iframe.src;
@@ -648,6 +673,15 @@
 
             <div class="refresh-info">
                 实时 WebSocket 更新 | 后台数据每秒更新
+            </div>
+
+            <div class="github-link">
+                <a
+                    href="https://github.com/I-Info/exchange-rated"
+                    target="_blank"
+                >
+                    Rated - GitHub
+                </a>
             </div>
         </div>
     </body>
