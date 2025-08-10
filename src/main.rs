@@ -10,15 +10,23 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Timelike, Utc};
+use chrono_tz::Asia::Shanghai;
+use dotenv::dotenv;
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use lettre::{
+    Message,
+    message::{Mailbox, header::ContentType},
+    transport::smtp::{PoolConfig, authentication::Credentials},
+};
 use regex::Regex;
 use reqwest::{
     Client,
     header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, sqlite::SqlitePool};
+use sqlx::{Row, sqlite::SqlitePool};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tower::ServiceBuilder;
@@ -42,6 +50,23 @@ static RE: LazyLock<Regex> = LazyLock::new(|| {
 struct RateRecord {
     rate: String,
     timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct ExtremeValues {
+    high_rate: f64,
+    low_rate: f64,
+    high_timestamp: DateTime<Utc>,
+    low_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct EmailConfig {
+    smtp_server: String,
+    smtp_username: String,
+    smtp_password: String,
+    from_email: String,
+    to_email: String,
 }
 
 #[derive(Clone, Debug)]
@@ -78,24 +103,41 @@ enum WebSocketMessage {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     rate_history: Arc<RwLock<VecDeque<RateRecord>>>,
     broadcast_tx: broadcast::Sender<WebSocketMessage>,
     db_pool: SqlitePool,
+    email_config: Option<EmailConfig>,
+    extreme_values: Arc<RwLock<Option<ExtremeValues>>>,
+    alert_state: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
+const RETRY: u32 = 3u32;
+
 impl AppState {
-    fn new(db_pool: SqlitePool) -> Self {
+    fn new(db_pool: SqlitePool, email_config: Option<EmailConfig>) -> Self {
         let (broadcast_tx, _) = broadcast::channel(1000);
+
+        if email_config.is_none() {
+            eprintln!("Warning: Email configuration not found. No email alerts will be sent.");
+        }
 
         Self {
             rate_history: Arc::new(RwLock::new(VecDeque::new())),
             broadcast_tx,
             db_pool,
+            email_config,
+            extreme_values: Arc::new(RwLock::new(None)),
+            alert_state: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn add_rate(&self, record: RateRecord) -> bool {
+    fn clean(&self) {
+        let mut history = self.rate_history.write().unwrap();
+        history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(5));
+    }
+
+    fn add_rate(&self, record: &RateRecord) -> bool {
         {
             let history = self.rate_history.read().unwrap();
 
@@ -110,24 +152,25 @@ impl AppState {
         }
 
         println!(
-            "+\n[{}] 澳元汇卖价: {}",
+            "+\n[{}] New Rate: {}",
             record.timestamp.format("%Y-%m-%d %H:%M:%S"),
             record.rate
         );
 
-        let should_persist = {
+        {
             let mut history = self.rate_history.write().unwrap();
             history.push_back(record.clone());
-
-            // Check if we need to persist (when reaching 150 records)
-            history.len() >= 150
         };
 
         // Broadcast the update to all connected WebSocket clients
-        let message = WebSocketMessage::RateUpdate { record };
+        let message = WebSocketMessage::RateUpdate {
+            record: record.clone(),
+        };
         let _ = self.broadcast_tx.send(message);
 
-        should_persist
+        tokio::spawn(persist_record(self.db_pool.clone(), record.clone()));
+
+        true
     }
 
     fn get_latest_rate(&self) -> Option<RateRecord> {
@@ -144,33 +187,137 @@ impl AppState {
         self.broadcast_tx.subscribe()
     }
 
-    async fn persist_to_db(&self) -> Result<(), sqlx::Error> {
-        let records_to_persist = {
-            let history = self.rate_history.read().unwrap();
-            history.iter().cloned().collect::<Vec<_>>()
+    async fn get_5day_extremes(&self) -> Result<Option<ExtremeValues>, sqlx::Error> {
+        let five_days_ago = Utc::now() - chrono::Duration::days(5);
+
+        if let Some(extreme_values) = self.extreme_values.read().unwrap().clone() {
+            if extreme_values.high_timestamp >= five_days_ago
+                && extreme_values.low_timestamp >= five_days_ago
+            {
+                return Ok(Some(extreme_values));
+            }
+        }
+
+        let rows = sqlx::query(
+            "SELECT rate, timestamp FROM rate_records WHERE timestamp >= ? ORDER BY timestamp;",
+        )
+        .bind(five_days_ago)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let mut high_rate = 0.0f64;
+        let mut low_rate = f64::MAX;
+        let mut high_timestamp = five_days_ago;
+        let mut low_timestamp = five_days_ago;
+
+        for row in rows {
+            let rate_str: String = row.get("rate");
+            let timestamp: DateTime<Utc> = row.get("timestamp");
+
+            if let Ok(rate) = rate_str.parse::<f64>() {
+                if rate > high_rate {
+                    high_rate = rate;
+                    high_timestamp = timestamp;
+                }
+                if rate < low_rate {
+                    low_rate = rate;
+                    low_timestamp = timestamp;
+                }
+            }
+        }
+
+        if low_rate == f64::MAX {
+            return Ok(None);
+        }
+
+        let values = Some(ExtremeValues {
+            high_rate,
+            low_rate,
+            high_timestamp,
+            low_timestamp,
+        });
+
+        {
+            let mut cache = self.extreme_values.write().unwrap();
+            *cache = values.clone();
+        }
+
+        Ok(values)
+    }
+
+    async fn send_email_alert(
+        &self,
+        subject: &str,
+        body: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let email_config = match &self.email_config {
+            Some(config) => config,
+            None => return Ok(()), // Skip if email not configured
         };
 
-        if records_to_persist.is_empty() {
+        send_email(email_config, subject, body).await
+    }
+
+    async fn check_and_alert_extremes(
+        &self,
+        current_record: &RateRecord,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Skip alerts during non-trading hours (Beijing time 10:00-23:00)
+        let beijing_time = Shanghai.from_utc_datetime(&current_record.timestamp.naive_utc());
+        let hour = beijing_time.hour();
+        if hour < 10 || hour >= 23 {
             return Ok(());
         }
 
-        // Use QueryBuilder to batch insert
-        let mut query_builder: QueryBuilder<sqlx::Sqlite> =
-            QueryBuilder::new("INSERT OR IGNORE INTO rate_records (rate, timestamp) ");
+        let current_rate = match current_record.rate.parse::<f64>() {
+            Ok(rate) => rate,
+            Err(_) => return Ok(()),
+        };
 
-        query_builder.push_values(&records_to_persist, |mut b, record| {
-            b.push_bind(&record.rate).push_bind(record.timestamp);
-        });
+        let extremes = match self.get_5day_extremes().await? {
+            Some(ext) => ext,
+            None => return Ok(()),
+        };
 
-        let result = query_builder.build().execute(&self.db_pool).await?;
-        println!("*\n已持久化 {} 条记录到数据库", result.rows_affected());
+        let now = Utc::now();
 
-        // Keep only the latest 100 records in memory
-        {
-            let mut history = self.rate_history.write().unwrap();
-            let len = history.len();
-            if len > 100 {
-                history.drain(..len - 100);
+        if current_rate < extremes.low_rate || current_rate > extremes.high_rate {
+            let should_alert = {
+                let alert_state = self.alert_state.read().unwrap();
+                match *alert_state {
+                    None => true,
+                    Some(last) => now.signed_duration_since(last).num_minutes() >= 20,
+                }
+            };
+
+            if should_alert {
+                {
+                    let mut alert_state = self.alert_state.write().unwrap();
+                    *alert_state = Some(now);
+                }
+
+                let dropping = current_rate < extremes.low_rate;
+                let subject = format!(
+                    "澳元汇率5日新{}: {}",
+                    if dropping { "低" } else { "高" },
+                    current_record.rate
+                );
+                let body = format!(
+                    "澳元汇率创5日新{}！\n\n当前汇率: {}\n时间: {}\n\n历史: {} ({})",
+                    if dropping { "低" } else { "高" },
+                    current_record.rate,
+                    current_record.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+                    extremes.low_rate,
+                    extremes.low_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                );
+
+                self.send_email_alert(&subject, &body).await?;
+
+                println!("*\nAlert Email Sent.");
             }
         }
 
@@ -178,9 +325,12 @@ impl AppState {
     }
 
     async fn load_from_db(&self) -> Result<(), sqlx::Error> {
+        let five_days_ago = Utc::now() - chrono::Duration::days(5);
+
         let rows = sqlx::query(
-            "SELECT rate, timestamp FROM rate_records ORDER BY timestamp DESC LIMIT 100",
+            "SELECT rate, timestamp FROM rate_records WHERE timestamp > $1 ORDER BY timestamp DESC",
         )
+        .bind(five_days_ago)
         .fetch_all(&self.db_pool)
         .await?;
 
@@ -194,31 +344,100 @@ impl AppState {
             history.push_back(RateRecord { rate, timestamp });
         }
 
-        println!("📚 从数据库加载了 {} 条历史记录", history.len());
+        println!("Loaded {} records from database", history.len());
         Ok(())
+    }
+}
+
+async fn send_email(
+    email_config: &EmailConfig,
+    subject: &str,
+    body: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let email = Message::builder()
+        .from(email_config.from_email.parse::<Mailbox>()?)
+        .to(email_config.to_email.parse::<Mailbox>()?)
+        .subject(subject)
+        .header(ContentType::TEXT_PLAIN)
+        .body(body.to_string())?;
+
+    let credentials = Credentials::new(
+        email_config.smtp_username.clone(),
+        email_config.smtp_password.clone(),
+    );
+
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_server)?
+        .credentials(credentials)
+        .pool_config(PoolConfig::new().max_size(1))
+        .build();
+
+    mailer.send(email).await?;
+
+    Ok(())
+}
+
+fn load_email_config() -> Option<EmailConfig> {
+    // Load email configuration from environment variables
+    if let (Ok(smtp_server), Ok(smtp_username), Ok(smtp_password), Ok(from_email), Ok(to_email)) = (
+        std::env::var("SMTP_SERVER"),
+        std::env::var("SMTP_USERNAME"),
+        std::env::var("SMTP_PASSWORD"),
+        std::env::var("FROM_EMAIL"),
+        std::env::var("TO_EMAIL"),
+    ) {
+        Some(EmailConfig {
+            smtp_server,
+            smtp_username,
+            smtp_password,
+            from_email,
+            to_email,
+        })
+    } else {
+        None
+    }
+}
+
+async fn persist_record(db_pool: SqlitePool, record: RateRecord) {
+    for r in 0..RETRY {
+        match sqlx::query("INSERT OR IGNORE INTO rate_records (rate, timestamp) VALUES (?, ?);")
+            .bind(&record.rate)
+            .bind(&record.timestamp)
+            .execute(&db_pool)
+            .await
+        {
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("Warning: Failed to persist rate record: {} ", e);
+                if r == RETRY - 1 {
+                    eprintln!(
+                        "Failed to persist rate record after {} retries: {}",
+                        RETRY, e
+                    );
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
 async fn fetch_sell_rate(
     client: &Client,
-    cache_info: &Arc<RwLock<Option<CacheInfo>>>,
+    cache_info: &mut Option<CacheInfo>,
 ) -> Option<RateRecord> {
     let mut headers = HeaderMap::new();
     // 添加缓存头部
-    {
-        let cache = cache_info.read().unwrap();
-        if let Some(cache) = &*cache {
-            // println!("使用缓存：{:?}", &cache);
-            // if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
-            //     headers.insert(IF_NONE_MATCH, header_value);
-            // } else {
-            //     eprintln!("*\n警告: ETag 格式无效: {}", &cache.etag);
-            // }
-            if let Ok(header_value) = HeaderValue::from_str(&cache.last_modified) {
-                headers.insert(IF_MODIFIED_SINCE, header_value);
-            } else {
-                eprintln!("*\n警告: Last-Modified 格式无效: {}", &cache.last_modified);
-            }
+    if let Some(cache) = cache_info {
+        // println!("使用缓存：{:?}", &cache);
+        // if let Ok(header_value) = HeaderValue::from_str(&cache.etag) {
+        //     headers.insert(IF_NONE_MATCH, header_value);
+        // } else {
+        //     eprintln!("*\n警告: ETag 格式无效: {}", &cache.etag);
+        // }
+        if let Ok(header_value) = HeaderValue::from_str(&cache.last_modified) {
+            headers.insert(IF_MODIFIED_SINCE, header_value);
+        } else {
+            eprintln!("*\n警告: Last-Modified 格式无效: {}", &cache.last_modified);
         }
     }
 
@@ -268,13 +487,11 @@ async fn fetch_sell_rate(
         // 更新缓存
         match &last_modified {
             Some(last_modified) => {
-                let mut cache = cache_info.write().unwrap();
-                let cache_info = CacheInfo {
+                *cache_info = Some(CacheInfo {
                     // etag: etag,
                     last_modified: last_modified.clone(),
-                };
+                });
                 // println!("{:?}", cache_info);
-                *cache = Some(cache_info);
             }
             _ => {
                 eprintln!("*\n错误: 缺少必要的缓存信息");
@@ -309,8 +526,6 @@ async fn fetch_sell_rate(
 }
 
 async fn rate_fetcher(state: AppState) {
-    println!("🚀 汇率获取器已启动，每1-5秒获取一次数据");
-
     let client = Client::builder()
         .user_agent(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
@@ -319,43 +534,21 @@ async fn rate_fetcher(state: AppState) {
         .read_timeout(Duration::from_secs(10))
         .build()
         .unwrap();
-    let cache_info: Arc<RwLock<Option<CacheInfo>>> = Arc::new(RwLock::new(None));
+    let mut cache_info: Option<CacheInfo> = None;
 
     loop {
-        match fetch_sell_rate(&client, &cache_info).await {
+        match fetch_sell_rate(&client, &mut cache_info).await {
             Some(current_rate) => {
-                let should_persist = state.add_rate(current_rate);
-                if should_persist {
-                    if let Err(e) = state.persist_to_db().await {
-                        eprintln!("❌ 持久化失败: {}", e);
+                if state.add_rate(&current_rate) {
+                    // Check for extreme value alerts
+                    if let Err(e) = state.check_and_alert_extremes(&current_rate).await {
+                        eprintln!("X Failed to check and alert extremes: {}", e);
                     }
                 }
             }
             None => (),
         }
         sleep(Duration::from_millis(rand::random_range(1000..5000))).await;
-    }
-}
-
-async fn periodic_persister(state: AppState) {
-    let persist_interval = Duration::from_secs(1800);
-    println!(
-        "⏰ 持久化定时器已启动，每{}s执行一次",
-        persist_interval.as_secs()
-    );
-
-    loop {
-        sleep(persist_interval).await;
-        let history_len = {
-            let history = state.rate_history.read().unwrap();
-            history.len()
-        };
-
-        if history_len > 0 {
-            if let Err(e) = state.persist_to_db().await {
-                eprintln!("❌ 定时持久化失败: {}", e);
-            }
-        }
     }
 }
 
@@ -552,8 +745,22 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+async fn cleaner(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+    // Ignore the first tick, which is triggered immediately after the interval is created
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        println!("*\nCleaner triggered.");
+        state.clean();
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file if present
+    dotenv().ok();
+
     // Initialize database
     let db = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:rates.db".to_string());
     println!("Database URL: {}", db);
@@ -562,27 +769,25 @@ async fn main() {
     // Run migrations
     sqlx::migrate!("./migrations").run(&db_pool).await.unwrap();
 
-    let state = AppState::new(db_pool);
+    let email_config = load_email_config();
+    let state = AppState::new(db_pool, email_config);
 
     // Load existing data from database
     if let Err(e) = state.load_from_db().await {
-        eprintln!("⚠️ 加载历史数据失败: {}", e);
+        eprintln!("加载历史数据失败: {}", e);
     }
+
+    let mut tasks = Vec::new();
+
+    let cleaner_state = state.clone();
+    tasks.push(tokio::spawn(cleaner(cleaner_state)));
 
     // Start the rate fetcher in the background
     let fetcher_state = state.clone();
-    tokio::spawn(async move {
-        rate_fetcher(fetcher_state).await;
-    });
-
-    // Start the periodic persister in the background
-    let persister_state = state.clone();
-    tokio::spawn(async move {
-        periodic_persister(persister_state).await;
-    });
+    tasks.push(tokio::spawn(rate_fetcher(fetcher_state)));
 
     let server_state = state.clone();
-    tokio::spawn(async move {
+    tasks.push(tokio::spawn(async move {
         // Build the router
         let app = Router::new()
             .route("/", get(home_page))
@@ -593,16 +798,44 @@ async fn main() {
             .with_state(server_state);
 
         // Start the server
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .unwrap();
 
-        println!("🚀 Server running on http://127.0.0.1:3000");
-        println!("🔌 WebSocket endpoint: ws://127.0.0.1:3000/ws");
+        println!("Server is running on http://127.0.0.1:{}", port);
 
         axum::serve(listener, app).await.unwrap();
-    });
+    }));
 
+    // Gracefully wait for shutdown signal
     wait_for_shutdown_signal().await;
-    state.persist_to_db().await.unwrap();
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_smtp() {
+        dotenv::dotenv().ok();
+
+        // Initialize email configuration
+        let email_config = load_email_config();
+        dbg!(&email_config);
+        if let Some(email_config) = email_config {
+            match send_email(&email_config, "Subject", "This is a test email. ").await {
+                Ok(()) => println!("Email sent successfully"),
+                Err(e) => panic!("{:?}", e),
+            }
+        } else {
+            eprintln!("Warning: Email configuration not found. No email alerts will be sent.");
+        }
+    }
 }
