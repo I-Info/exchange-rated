@@ -265,6 +265,7 @@ impl AppState {
             *cache = values.clone();
         }
 
+        println!("*\nLoaded history extremes: {values:?}");
         Ok(values)
     }
 
