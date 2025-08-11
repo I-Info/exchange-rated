@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>澳元汇率监控</title>
+        <title>AUD/CNY</title>
         <style>
             body {
                 font-family:
@@ -222,7 +222,7 @@
                     new Date(record.timestamp).toLocaleString("zh-CN");
 
                 // Update page title with current rate
-                document.title = `澳元汇率监控 - ${record.rate}`;
+                document.title = `AUD/CNY - ${record.rate}`;
             }
 
             function updateHistory(records) {
@@ -526,7 +526,7 @@
                 // Update title with initial rate if available
                 const initialRate = document.querySelector(".rate-value");
                 if (initialRate && initialRate.textContent.trim()) {
-                    document.title = `澳元汇率监控 - ${initialRate.textContent.trim()}`;
+                    document.title = `AUD/CNY - ${initialRate.textContent.trim()}`;
                 }
 
                 const iframe = document.getElementById("googlefinance");
@@ -559,7 +559,7 @@
     </head>
     <body>
         <div class="container">
-            <h1>澳元汇率监控 (AUD/CNY)</h1>
+            <h1>实时汇率监控 (AUD/CNY)</h1>
 
             <div id="connection-status" class="connection-status connecting">
                 🟡 正在连接 WebSocket...
