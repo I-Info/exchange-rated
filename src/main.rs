@@ -310,10 +310,11 @@ impl AppState {
 
 impl Ntfy {
     fn send(&self, current_record: &RateRecord, pre_extreme: Extreme) -> Option<JoinHandle<()>> {
-        // Skip alerts during non-trading hours (Beijing time 10:00-23:00)
+        // Skip alerts during non-trading hours (Beijing time 9:30-23:00)
         let beijing_time = Shanghai.from_utc_datetime(&current_record.timestamp.naive_utc());
         let hour = beijing_time.hour();
-        if !(10..23).contains(&hour) {
+        let minute = beijing_time.minute();
+        if !((10..23).contains(&hour) || (hour == 9 && minute >= 30)) {
             return None;
         }
 
