@@ -3,3 +3,6 @@ rates.db
 .env
 *.db
 *.db-journal
+
+# Node
+node_modules

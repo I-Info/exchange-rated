@@ -1,3 +1,6 @@
+use super::models::*;
+use crate::models::{RateRecord, ServerEvent};
+
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use std::{collections::VecDeque, io::Write};
@@ -15,8 +18,6 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::models::*;
-
 static URL: &str = "https://www.boc.cn/sourcedb/whpj/mfx_1620.html";
 
 static RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -30,8 +31,7 @@ const RETRY: u32 = 3u32;
 
 impl AppState {
     pub fn new(db_pool: sqlx::SqlitePool) -> Self {
-        let (broadcast_tx, _rx) = broadcast::channel(1000);
-
+        let (broadcast_tx, _rx) = broadcast::channel(100);
         Self {
             broadcast_tx,
             db_pool,
@@ -71,7 +71,7 @@ impl AppState {
         };
 
         // Broadcast the update to all connected WebSocket clients
-        let message = WebSocketMessage::RateUpdate {
+        let message = ServerEvent::RateUpdate {
             record: record.clone(),
         };
         let _ = self.broadcast_tx.send(message);
@@ -89,7 +89,7 @@ impl AppState {
         history.iter().rev().cloned().collect()
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<WebSocketMessage> {
+    pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         self.broadcast_tx.subscribe()
     }
 
@@ -327,19 +327,6 @@ pub async fn ntfy_send(
     }
 }
 
-pub fn load_ntfy_config() -> Option<NtfyConfig> {
-    // Load email configuration from environment variables
-    if let Ok(url) = std::env::var("NTFY_URL") {
-        let auth = std::env::var("NTFY_AUTH");
-        Some(NtfyConfig {
-            url,
-            auth: auth.ok(),
-        })
-    } else {
-        None
-    }
-}
-
 pub async fn persist_record(db_pool: sqlx::SqlitePool, record: RateRecord) {
     for r in 0..RETRY {
         match sqlx::query("INSERT OR IGNORE INTO rate_records (rate, timestamp) VALUES (?, ?);")
@@ -550,7 +537,8 @@ pub fn prepare_rate_display(history: &[RateRecord]) -> Vec<RateDisplay> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Extreme, RateRecord};
+    use crate::server::services::Ntfy;
+    use crate::server::utils::load_ntfy_config;
     use chrono::Utc;
     use dotenv::dotenv;
     use std::time::Duration;

@@ -1,0 +1,12 @@
+@import "tailwindcss" source(none);
+@source "./src/**/*.{rs}";
+@plugin "@tailwindcss/typography";
+@plugin "daisyui" {
+    exclude: rootcolor;
+}
+
+:root,
+[data-theme] {
+    background-color: var(--root-bg, var(--color-base-200));
+    color: var(--color-base-content);
+}

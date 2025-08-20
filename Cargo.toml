@@ -14,18 +14,51 @@ name = "rated"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate"] }
+dioxus = { version = "0.7.0-rc.0", features = ["fullstack"] }
+serde = { version = "1.0" }
+serde_json = { version = "1.0" }
+futures = "0.3.31"
 chrono = { version = "0.4", features = ["serde"] }
-regex = "1.11.1"
-axum = { version = "0.8.4", features = ["ws"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tower = "0.5.2"
-tower-http = { version = "0.6.6", features = ["cors"] }
-askama = "0.14.0"
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono"] }
-rand = "0.9.1"
-chrono-tz = "0.10"
-dotenv = "0.15"
-futures-util = "0.3.31"
+# Server dependencies
+tokio = { version = "1", features = ["full"], optional = true }
+reqwest = { version = "0.12", features = [
+    "json",
+    "gzip",
+    "brotli",
+    "deflate",
+], optional = true }
+regex = { version = "1.11.1", optional = true }
+axum = { version = "0.8.4", features = ["ws"], optional = true }
+tower = { version = "0.5.2", optional = true }
+tower-http = { version = "0.6.6", features = ["cors"], optional = true }
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+], optional = true }
+rand = { version = "0.9.1", optional = true }
+chrono-tz = { version = "0.10", optional = true }
+dotenv = { version = "0.15", optional = true }
+tokio-stream = { version = "0.1.17", features = ["sync"], optional = true }
+anyhow = { version = "1.0.99", optional = true }
+# Web dependencies
+gloo-net = { version = "0.6.0", optional = true }
+
+[features]
+default = ["server"]
+server = [
+    "dioxus/server",
+    "dep:tokio",
+    "dep:axum",
+    "dep:reqwest",
+    "dep:chrono-tz",
+    "dep:regex",
+    "dep:rand",
+    "dep:dotenv",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:sqlx",
+    "dep:tokio-stream",
+    "dep:anyhow",
+]
+web = ["dioxus/web", "dep:gloo-net"]

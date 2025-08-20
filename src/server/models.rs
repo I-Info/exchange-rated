@@ -1,15 +1,10 @@
+use crate::models::{RateRecord, ServerEvent};
+
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
-use std::{collections::VecDeque};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RateRecord {
-    pub rate: String,
-    pub timestamp: DateTime<Utc>,
-}
 
 #[derive(Clone, Debug)]
 pub struct ExtremeValues {
@@ -38,23 +33,10 @@ pub struct RateDisplay {
     pub change_indicator: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WebSocketMessage {
-    #[serde(rename = "rate_update")]
-    RateUpdate { record: RateRecord },
-    #[serde(rename = "history")]
-    History { records: Vec<RateRecord> },
-    #[serde(rename = "ping")]
-    Ping,
-    #[serde(rename = "pong")]
-    Pong,
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub rate_history: Arc<RwLock<VecDeque<RateRecord>>>,
-    pub broadcast_tx: broadcast::Sender<WebSocketMessage>,
+    pub broadcast_tx: broadcast::Sender<ServerEvent>,
     pub extreme_values: Arc<RwLock<Option<ExtremeValues>>>,
     pub db_pool: sqlx::SqlitePool,
 }
