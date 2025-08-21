@@ -24,21 +24,17 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
 
     // Send initial history to the client
     let history = state.get_history();
-    let history_message = ServerEvent::History { records: history };
-    if let Ok(msg) = serde_json::to_string(&history_message) {
-        if sender.send(ws::Message::Text(msg.into())).await.is_err() {
+    let history_message = ServerEvent::History(history);
+    if let Ok(msg) = serde_json::to_string(&history_message)
+        && sender.send(ws::Message::Text(msg.into())).await.is_err() {
             return;
         }
-    }
 
     // Handle incoming messages from client
     let recv_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
-            match msg {
-                Ok(ws::Message::Close(_)) => {
-                    break;
-                }
-                _ => {}
+            if let Ok(ws::Message::Close(_)) = msg {
+                break;
             }
         }
     });
@@ -46,15 +42,14 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
     // Handle broadcast messages and internal messages to client
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
-            if let Ok(json_msg) = serde_json::to_string(&msg) {
-                if sender
+            if let Ok(json_msg) = serde_json::to_string(&msg)
+                && sender
                     .send(ws::Message::Text(json_msg.into()))
                     .await
                     .is_err()
                 {
                     break;
                 }
-            }
         }
     });
 
@@ -77,7 +72,7 @@ pub async fn sse_handler(
 ) -> Sse<impl futures::Stream<Item = Result<Event, anyhow::Error>>> {
     let history = state.get_history();
     let rx = state.subscribe();
-    let stream = stream::once(async { Ok(ServerEvent::History { records: history }) })
+    let stream = stream::once(async { Ok(ServerEvent::History(history)) })
         .chain(BroadcastStream::from(rx))
         .map(|event| match event {
             Ok(event) => Ok(Event::default().json_data(event)?),

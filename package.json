@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "build": "tailwindcss -i ./input.css -o ./assets/tailwind.css --optimize"
+    "build": "tailwindcss -i ./input.css -o ./assets/tailwind.css --optimize",
+    "fmt": "rustywind --custom-regex \"\\bclass:\\s*['\\\"]([^'\\\"]*)['\\\"]\" --output-css-file assets/tailwind.css --write src"
   },
   "devDependencies": {
+    "@iconify-json/tabler": "^1.2.22",
+    "@iconify/tailwind4": "^1.0.6",
     "@tailwindcss/cli": "^4.1.12",
-    "@tailwindcss/typography": "^0.5.16",
-    "daisyui": "^5.0.50",
+    "flyonui": "^2.4.0",
     "tailwindcss": "^4.1.12"
   }
 }

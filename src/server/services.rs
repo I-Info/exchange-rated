@@ -49,13 +49,13 @@ impl AppState {
         {
             let history = self.rate_history.read().unwrap();
 
-            if let Some(last_record) = history.back() {
-                if last_record.timestamp == record.timestamp {
-                    let mut stdout = std::io::stdout();
-                    stdout.write_all(b"+").unwrap();
-                    stdout.flush().unwrap();
-                    return false;
-                }
+            if let Some(last_record) = history.back()
+                && last_record.timestamp == record.timestamp
+            {
+                let mut stdout = std::io::stdout();
+                stdout.write_all(b"+").unwrap();
+                stdout.flush().unwrap();
+                return false;
             }
         }
 
@@ -71,9 +71,7 @@ impl AppState {
         };
 
         // Broadcast the update to all connected WebSocket clients
-        let message = ServerEvent::RateUpdate {
-            record: record.clone(),
-        };
+        let message = ServerEvent::RateUpdate(record.clone());
         let _ = self.broadcast_tx.send(message);
 
         true
@@ -86,7 +84,7 @@ impl AppState {
 
     pub fn get_history(&self) -> Vec<RateRecord> {
         let history = self.rate_history.read().unwrap();
-        history.iter().rev().cloned().collect()
+        history.iter().cloned().collect()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
@@ -120,13 +118,12 @@ impl AppState {
     pub async fn get_history_extremes(&self) -> Result<Option<ExtremeValues>, sqlx::Error> {
         let five_days_ago = Utc::now() - chrono::Duration::days(5);
 
-        if let Some(extreme_values) = &*self.extreme_values.read().unwrap() {
-            if extreme_values.high_timestamp >= five_days_ago
+        if let Some(extreme_values) = &*self.extreme_values.read().unwrap()
+            && extreme_values.high_timestamp >= five_days_ago
                 && extreme_values.low_timestamp >= five_days_ago
             {
                 return Ok(Some(extreme_values.clone()));
             }
-        }
 
         let rows = sqlx::query(
             "SELECT rate, timestamp FROM rate_records WHERE timestamp >= ? ORDER BY timestamp;",
@@ -464,20 +461,21 @@ pub async fn rate_fetcher(state: AppState, ntfy: Option<Ntfy>) {
     let mut cache_info: Option<CacheInfo> = None;
 
     loop {
-        if let Some(current_rate) = fetch_sell_rate(&client, &mut cache_info).await {
-            if state.add_rate(&current_rate) {
-                // Check for extreme value alerts
-                match (state.check_extremes(&current_rate).await, &ntfy) {
-                    (Ok(Some(old)), Some(ntfy)) => {
-                        _ = ntfy.send(&current_rate, old);
-                    }
-                    (Err(e), _) => eprintln!("X Failed to check extremes: {e}"),
-                    _ => (),
-                };
+        if let Some(current_rate) = fetch_sell_rate(&client, &mut cache_info).await
+            && state.add_rate(&current_rate)
+        {
+            // Check for extreme value alerts
+            match (state.check_extremes(&current_rate).await, &ntfy) {
+                (Ok(Some(old)), Some(ntfy)) => {
+                    _ = ntfy.send(&current_rate, old);
+                }
+                (Err(e), _) => eprintln!("X Failed to check extremes: {e}"),
+                _ => (),
+            };
 
-                tokio::spawn(persist_record(state.db_pool.clone(), current_rate));
-            }
+            tokio::spawn(persist_record(state.db_pool.clone(), current_rate));
         }
+
         sleep(Duration::from_millis(rand::random_range(1000..5000))).await;
     }
 }

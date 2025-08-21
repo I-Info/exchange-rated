@@ -6,3 +6,6 @@ rates.db
 
 # Node
 node_modules
+
+# dist
+assets/tailwind.css

@@ -10,22 +10,22 @@
           "features": ["web", "server"]
         }
       }
-    },
-    "tailwindcss-language-server": {
-      "settings": {
-        "includeLanguages": {
-          "rust": "html"
-        },
-        "experimental": {
-          "classRegex": ["class: \"(.*)\""],
-          "configFile": "input.css"
-        }
-      }
     }
-  },
-  "languages": {
-    "Rust": {
-      "language_servers": ["rust-analyzer", "tailwindcss-language-server"]
-    }
+    // "tailwindcss-language-server": {
+    //   "settings": {
+    //     "includeLanguages": {
+    //       "rust": "html"
+    //     },
+    //     "experimental": {
+    //       "classRegex": ["class: \"(.*)\""],
+    //       "configFile": "input.css"
+    //     }
+    //   }
+    // }
   }
+  // "languages": {
+  //   "Rust": {
+  //     "language_servers": ["rust-analyzer", "tailwindcss-language-server"]
+  //   }
+  // }
 }
