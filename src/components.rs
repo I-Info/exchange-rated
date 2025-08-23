@@ -53,7 +53,7 @@ pub fn App() -> Element {
         document::Link { rel: "stylesheet", href: APEXCHART_CSS }
         script { src: LODASH_JS }
         script { src: APEXCHART_JS }
-        main { class: "@container", Main {} }
+        main { class: "@container flex min-h-screen flex-col", Main {} }
 
     )
 }
@@ -172,14 +172,14 @@ fn Main() -> Element {
 
     rsx!(
         document::Title { "Rated" }
-        div { class: "mx-auto max-w-full px-4 @4xl:max-w-4xl",
-            div { class: "card my-4",
+        div { class: "mx-auto w-full flex-1 px-4 @4xl:max-w-4xl",
+            div { class: "card my-4 w-full",
                 div { class: "card-body text-center",
-                    div { class: "mb-4 items-center flex @sm:grid @sm:grid-cols-[1fr_auto_1fr]",
-                        h3 { class: "card-title text-left @sm:col-start-2 @sm:text-center",
+                    div { class: "mb-4 flex items-center @sm:grid @sm:grid-cols-[1fr_auto_1fr]",
+                        h3 { class: "text-left card-title @sm:col-start-2 @sm:text-center",
                             "Latest Rate"
                         }
-                        span { class: "ml-auto @sm:ml-0 @sm:col-start-3 @sm:justify-self-end {connection_status.read().badge_class()}",
+                        span { class: "ml-auto @sm:col-start-3 @sm:ml-0 @sm:justify-self-end {connection_status.read().badge_class()}",
                             {connection_status.read().text()}
                         }
                     }
@@ -187,15 +187,31 @@ fn Main() -> Element {
                 }
             }
             Chart { records: records_local }
-            footer { class: "footer bg-base-100/80 items-center rounded-t-box px-6 py-4 shadow-base-300/20 shadow-sm",
-                aside { class: "grid-flow-col items-center",
-                    p {
-                        "©2025 ",
-                        a { class: "link link-hover font-medium", href: "https://github.com/I-Info/exchange-rated", "Rated" }
+        }
+        footer { class: "flex items-center gap-4 rounded-t-box bg-base-100/80 px-6 py-4 shadow-sm shadow-base-300/20",
+            aside { class: "items-center",
+                p { class: "flex gap-1 text-base-content/50",
+                    a {
+                        class: "link font-medium link-hover text-base-content",
+                        href: "https://github.com/I-Info/exchange-rated",
+                        "Rated "
                     }
+                    "©2025"
                 }
-                nav { class: "text-base-content grid-flow-col gap-4 md:place-self-center md:justify-self-end",
-                    a { class: "link link-hover", href: "https://github.com/I-Info", "by IInfo" }
+            }
+            p { class: "ml-auto flex gap-1 text-base-content/50",
+                span { class: "hidden @lg:inline", "Powered by " }
+                a {
+                    class: "link hidden @lg:inline link-hover text-base-content",
+                    href: "https://dioxuslabs.com",
+                    "@Dioxus"
+                }
+                span { class: "hidden @lg:inline", ", developed by " }
+                span { class: "@lg:hidden", "by " }
+                a {
+                    class: "link inline link-hover text-base-content",
+                    href: "https://github.com/I-Info",
+                    "@IInfo"
                 }
             }
         }
