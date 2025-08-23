@@ -4,6 +4,7 @@
 @plugin "flyonui" {
     exclude: rootcolor;
 }
+@import "flyonui/src/vendor/apexcharts.css";
 
 :root,
 [data-theme] {

@@ -21,6 +21,7 @@ futures = "0.3.31"
 chrono = { version = "0.4", features = ["serde"] }
 # Server dependencies
 tokio = { version = "1", features = ["full"], optional = true }
+rand = { version = "0.9.1", optional = true }
 reqwest = { version = "0.12", features = [
     "json",
     "gzip",
@@ -36,7 +37,6 @@ sqlx = { version = "0.8.6", features = [
     "sqlite",
     "chrono",
 ], optional = true }
-rand = { version = "0.9.1", optional = true }
 chrono-tz = { version = "0.10", optional = true }
 dotenv = { version = "0.15", optional = true }
 tokio-stream = { version = "0.1.17", features = ["sync"], optional = true }
@@ -44,17 +44,19 @@ anyhow = { version = "1.0.99", optional = true }
 # Web dependencies
 gloo-net = { version = "0.6.0", optional = true }
 gloo-utils = { version = "0.2.0", features = ["serde"], optional = true }
+gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
+web-sys = { version = "0.3.77", optional = true }
 
 [features]
 default = ["server"]
 server = [
     "dioxus/server",
     "dep:tokio",
+    "dep:rand",
     "dep:axum",
     "dep:reqwest",
     "dep:chrono-tz",
     "dep:regex",
-    "dep:rand",
     "dep:dotenv",
     "dep:tower",
     "dep:tower-http",
@@ -62,4 +64,10 @@ server = [
     "dep:tokio-stream",
     "dep:anyhow",
 ]
-web = ["dioxus/web", "dep:gloo-net", "dep:gloo-utils"]
+web = [
+    "dioxus/web",
+    "dep:gloo-net",
+    "dep:gloo-utils",
+    "dep:gloo-timers",
+    "dep:web-sys",
+]

@@ -1,7 +1,7 @@
 use rated::components::App;
 
 fn main() {
-    dioxus::logger::init(dioxus::logger::tracing::Level::INFO).unwrap();
+    dioxus::logger::initialize_default();
 
     #[cfg(feature = "web")]
     // Hydrate the application on the client
