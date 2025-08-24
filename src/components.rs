@@ -1,8 +1,6 @@
-use crate::models::{RateRecord, RateRecordWithLocalTime, ServerEvent};
+use crate::models::{RateRecord, RateRecordWithLocalTime};
 
-use dioxus::{logger::tracing, prelude::*};
-use futures::StreamExt;
-use serde::Serialize;
+use dioxus::prelude::*;
 
 // const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("./assets/tailwind.css");
@@ -15,10 +13,12 @@ struct RenderedRecord {
     update_time: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 enum ConnectionStatus {
     Connecting,
     Connected,
+    Closed,
     Error,
 }
 
@@ -27,6 +27,7 @@ impl ConnectionStatus {
         match self {
             ConnectionStatus::Connecting => "badge badge-warning",
             ConnectionStatus::Connected => "badge badge-success",
+            ConnectionStatus::Closed => "badge badge-info",
             ConnectionStatus::Error => "badge badge-error",
         }
     }
@@ -35,6 +36,7 @@ impl ConnectionStatus {
         match self {
             ConnectionStatus::Connecting => "Connecting",
             ConnectionStatus::Connected => "Live",
+            ConnectionStatus::Closed => "Closed",
             ConnectionStatus::Error => "Error",
         }
     }
@@ -58,16 +60,21 @@ pub fn App() -> Element {
     )
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[cfg(feature = "web")]
+#[derive(Debug, Clone, serde::Serialize)]
 struct ChartData {
     x: i64, // timestamp
     y: f64, // rate
 }
 
+#[cfg(feature = "web")]
+const MAX_RETRIES: u32 = 10;
+
 #[component]
 fn Main() -> Element {
     let records = use_server_future(get_rate)?.unwrap()?;
 
+    #[allow(unused_mut)]
     let mut records_local: Signal<Vec<RateRecordWithLocalTime>> = use_signal(|| {
         records
             .iter()
@@ -75,25 +82,58 @@ fn Main() -> Element {
             .collect::<Vec<_>>()
     });
 
+    #[allow(unused_mut)]
     let mut connection_status = use_signal(|| ConnectionStatus::Connecting);
 
     #[cfg(feature = "web")]
     use_future(move || async move {
+        use crate::models::ServerEvent;
+        use dioxus::logger::tracing;
+        use futures::StreamExt;
+        use gloo_net::eventsource::State;
         use gloo_net::eventsource::futures::EventSource;
         use gloo_timers::future::TimeoutFuture;
+        use web_sys::wasm_bindgen::JsCast;
 
         let mut retry_count = 0u32;
-        const MAX_RETRIES: u32 = 10;
 
         loop {
             if let Ok(mut es) = EventSource::new("/sse")
                 && let Ok(mut stream) = es.subscribe("message")
             {
-                connection_status.set(ConnectionStatus::Connected);
-                retry_count = 0; // Reset retry count on successful connection
-                tracing::info!("SSE connected successfully");
+                // ES Connection checker
+                let es_clone = es.clone();
+                let task = spawn(async move {
+                    loop {
+                        match es_clone.state() {
+                            State::Open => {
+                                connection_status.set(ConnectionStatus::Connected);
+                            }
+                            State::Closed => {
+                                connection_status.set(ConnectionStatus::Closed);
+                                return;
+                            }
+                            State::Connecting => {
+                                connection_status.set(ConnectionStatus::Connecting);
+                            }
+                        }
+                        TimeoutFuture::new(1000).await;
+                    }
+                });
+
+                // close es before unload
+                let es_clone = es.clone();
+                let on_unload = web_sys::wasm_bindgen::closure::Closure::once_into_js(move || {
+                    connection_status.set(ConnectionStatus::Closed);
+                    es_clone.close();
+                });
+                web_sys::window()
+                    .unwrap()
+                    .add_event_listener_with_callback("beforeunload", on_unload.unchecked_ref())
+                    .unwrap();
 
                 while let Some(Ok((_type, msg))) = stream.next().await {
+                    connection_status.set(ConnectionStatus::Connected);
                     if let Some(raw) = msg.data().as_string() {
                         match serde_json::from_str::<ServerEvent>(&raw) {
                             Ok(ServerEvent::RateUpdate(record)) => {
@@ -105,19 +145,27 @@ fn Main() -> Element {
                                 records_local.set(
                                     records
                                         .into_iter()
-                                        .map(|record| RateRecordWithLocalTime::from(record))
+                                        .map(RateRecordWithLocalTime::from)
                                         .collect::<Vec<_>>(),
                                 );
                                 tracing::debug!("History received.");
                             }
                             Err(err) => {
                                 tracing::error!("Failed to parse server event: {}", err);
+                                break;
                             }
                         }
                     }
                 }
 
-                tracing::warn!("Event Source connection closed, attempting reconnect...");
+                task.cancel();
+                if connection_status() == ConnectionStatus::Closed {
+                    // Unloaded, abort
+                    return;
+                }
+                es.close();
+                connection_status.set(ConnectionStatus::Error);
+                tracing::warn!("Stream being interrupted by some reason, closed.");
             } else {
                 connection_status.set(ConnectionStatus::Error);
                 tracing::error!(
@@ -135,11 +183,10 @@ fn Main() -> Element {
             }
 
             // Exponential backoff with jitter: base delay of 500ms, max 30s
-            let delay_ms = std::cmp::min(500 * 2u32.pow(retry_count), 30000);
-            let jitter = (web_sys::js_sys::Math::random() * 0.1 + 0.9) as f64; // 10% jitter
+            let delay_ms = std::cmp::min(200 * 2u32.pow(retry_count), 30000);
+            let jitter = (web_sys::js_sys::Math::random() * 0.1 + 0.95) as f64; // 10% jitter
             let final_delay = (delay_ms as f64 * jitter) as u32;
             tracing::info!("Reconnecting in {}ms...", final_delay);
-            connection_status.set(ConnectionStatus::Connecting);
             TimeoutFuture::new(final_delay).await;
         }
     });
@@ -293,7 +340,6 @@ pub fn Chart(records: Signal<Vec<RateRecordWithLocalTime>>) -> Element {
             .unwrap(),
         );
         let instance = Reflect::construct(apexcharts_fn, &param_array).unwrap();
-        tracing::info!("ApexCharts instance created: {:?}", instance);
 
         let render_fn = Reflect::get(&instance, &JsValue::from_str("render")).unwrap();
         let render_fn: &Function = render_fn.dyn_ref().unwrap();
