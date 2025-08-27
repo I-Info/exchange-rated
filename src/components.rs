@@ -8,6 +8,7 @@ const APEXCHART_CSS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.c
 const APEXCHART_JS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.min.js");
 const LODASH_JS: Asset = asset!("./node_modules/lodash/lodash.min.js");
 
+#[derive(Clone, Debug)]
 struct RenderedRecord {
     rate: String,
     update_time: String,
@@ -191,31 +192,28 @@ fn Main() -> Element {
         }
     });
 
-    let current = use_memo(move || {
+    let mut current = use_signal(move || {
         records_local
             .read_unchecked()
             .last()
             .map(|record| RenderedRecord {
                 rate: record.rate.clone(),
-                update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
             })
     });
 
-    let inner = match &*current.read_unchecked() {
-        Some(current) => {
-            rsx!(
-                document::Title { "AUD/CNY: {current.rate}" }
-                div { class: "text-4xl font-bold text-base-content", "{current.rate}" }
-                p { class: "text-gray-500", "Date: {current.update_time}" }
-            )
-        }
-        None => {
-            rsx!(
-                div { class: "text-4xl font-bold text-base-content", "No Rate Available" }
-                p { class: "text-gray-500", "Date: N/A" }
-            )
-        }
-    };
+    #[cfg(feature = "web")]
+    use_future(move || async move {
+        current.set(
+            records_local
+                .read_unchecked()
+                .last()
+                .map(|record| RenderedRecord {
+                    rate: record.rate.clone(),
+                    update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                }),
+        );
+    });
 
     rsx!(
         document::Title { "Rated" }
@@ -230,7 +228,7 @@ fn Main() -> Element {
                             {connection_status.read().text()}
                         }
                     }
-                    {inner}
+                    RateContent { current: current()}
                 }
             }
             Chart { records: records_local }
@@ -263,6 +261,23 @@ fn Main() -> Element {
             }
         }
     )
+}
+
+#[component]
+fn RateContent(current: Option<RenderedRecord>) -> Element {
+    match current {
+        Some(current) => {
+            rsx!(
+                document::Title { "AUD/CNY: {current.rate}" }
+                div { class: "text-4xl font-bold text-base-content", "{current.rate}" }
+                p { class: "text-gray-500", "Date: {current.update_time}" }
+            )
+        }
+        None => rsx!(
+            div { class: "text-4xl font-bold text-base-content", "No Rate Available" }
+            p { class: "text-gray-500", "Date: N/A" }
+        ),
+    }
 }
 
 #[component]
