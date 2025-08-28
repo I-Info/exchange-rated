@@ -11,3 +11,7 @@
     background-color: var(--root-bg, var(--color-base-200));
     color: var(--color-base-content);
 }
+
+:root {
+    overflow-x: hidden;
+}

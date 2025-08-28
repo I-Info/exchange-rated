@@ -9,3 +9,9 @@ node_modules
 
 # dist
 assets/tailwind.css
+
+# Apple
+.DS_Store
+
+# Zed
+.zed

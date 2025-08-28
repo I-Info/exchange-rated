@@ -10,7 +10,7 @@
     "@iconify-json/tabler": "^1.2.22",
     "@iconify/tailwind4": "^1.0.6",
     "@tailwindcss/cli": "^4.1.12",
-    "apexcharts": "^5.3.3",
+    "apexcharts": "^5.3.4",
     "flyonui": "^2.4.0",
     "lodash": "^4.17.21",
     "tailwindcss": "^4.1.12"

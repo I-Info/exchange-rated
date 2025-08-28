@@ -2,7 +2,7 @@ use crate::models::{RateRecord, RateRecordWithLocalTime};
 
 use dioxus::prelude::*;
 
-// const FAVICON: Asset = asset!("/assets/favicon.ico");
+const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("./assets/tailwind.css");
 const APEXCHART_CSS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.css");
 const APEXCHART_JS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.min.js");
@@ -52,6 +52,7 @@ impl PartialEq for RenderedRecord {
 #[component]
 pub fn App() -> Element {
     rsx!(
+        document::Link { rel: "icon", href: FAVICON }
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { rel: "stylesheet", href: APEXCHART_CSS }
         script { src: LODASH_JS }
@@ -103,12 +104,12 @@ pub fn ExtremeValues(
     });
 
     rsx! {
-        div { class: "grid grid-cols-1 @sm:grid-cols-2 gap-4 my-4",
+        div { class: "my-4 grid grid-cols-1 gap-4 @sm:grid-cols-2",
             div { class: "card bg-base-100",
                 div { class: "card-body text-center",
-                    h4 { class: "card-title justify-center", "Highest" }
+                    h4 { class: "justify-center card-title", "Recent High" }
                     if let Some(record) = highest_rendered() {
-                        p { class: "text-2xl font-bold", "{record.rate}" }
+                        p { class: "text-2xl font-bold text-base-content", "{record.rate}" }
                         p { class: "text-xs text-base-content/60", "{record.update_time}" }
                     } else {
                         p { class: "text-2xl font-bold", "N/A" }
@@ -117,9 +118,9 @@ pub fn ExtremeValues(
             }
             div { class: "card bg-base-100",
                 div { class: "card-body text-center",
-                    h4 { class: "card-title justify-center", "Lowest" }
+                    h4 { class: "justify-center card-title", "Recent Low" }
                     if let Some(record) = lowest_rendered() {
-                        p { class: "text-2xl font-bold", "{record.rate}" }
+                        p { class: "text-2xl font-bold text-base-content", "{record.rate}" }
                         p { class: "text-xs text-base-content/60", "{record.update_time}" }
                     } else {
                         p { class: "text-2xl font-bold", "N/A" }
@@ -303,6 +304,20 @@ fn Main() -> Element {
         (high_record, low_record)
     });
 
+    // indicate rate delta
+    let delta = use_memo(move || {
+        if let Some(last) = records_local.last() {
+            if let Some(prev) = records_local.get(records_local.len() - 2) {
+                let delta = last.rate.parse::<f64>().unwrap() - prev.rate.parse::<f64>().unwrap();
+                Some(delta)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
     rsx!(
         document::Title { "Rated" }
         div { class: "mx-auto w-full flex-1 px-4 @4xl:max-w-4xl",
@@ -313,15 +328,53 @@ fn Main() -> Element {
                             "Latest Rate"
                         }
                         span { class: "ml-auto @sm:col-start-3 @sm:ml-0 @sm:justify-self-end {connection_status.read().badge_class()}",
-                            {connection_status.read().text()}
+                            {connection_status.read_unchecked().text()}
                         }
                     }
-                    RateContent { current: current()}
+                    {
+                        match &*current.read_unchecked() {
+                            Some(current) => {
+                                rsx! {
+                                    document::Title { "AUD/CNY: {current.rate}" }
+                                    div { class: "grid grid-cols-[1fr_auto_1fr] items-center",
+                                        span { class: "col-start-2 mx-2 text-4xl font-bold text-base-content", "{current.rate}" }
+                                        {
+                                            match *delta.read_unchecked() {
+                                                Some(delta) => {
+                                                    if delta > 0.0 {
+                                                        rsx! {
+                                                            span { class: "badge badge-success badge-soft", "{delta:+.2}" }
+                                                        }
+                                                    } else if delta < 0.0 {
+                                                        rsx! {
+                                                            span { class: "badge badge-error badge-soft", "{delta:.2}" }
+                                                        }
+                                                    } else {
+                                                        rsx! {
+                                                            span { class: "badge badge-soft badge-neutral", "{delta:.}" }
+                                                        }
+                                                    }
+                                                }
+                                                None => rsx! {},
+                                            }
+                                        }
+                                    }
+                                    p { class: "text-gray-500", "{current.update_time}" }
+                                }
+                            }
+                            None => rsx! {
+                                div { class: "text-4xl font-bold text-base-content", "No Rate Available" }
+                                p { class: "text-gray-500", "Date: N/A" }
+                            },
+                        }
+                    }
                 }
             }
             {
                 let (highest, lowest) = extremes();
-                rsx!(ExtremeValues { highest, lowest })
+                rsx! {
+                    ExtremeValues { highest, lowest }
+                }
             }
             Chart { records: records_local }
         }
@@ -353,23 +406,6 @@ fn Main() -> Element {
             }
         }
     )
-}
-
-#[component]
-fn RateContent(current: Option<RenderedRecord>) -> Element {
-    match current {
-        Some(current) => {
-            rsx!(
-                document::Title { "AUD/CNY: {current.rate}" }
-                div { class: "text-4xl font-bold text-base-content", "{current.rate}" }
-                p { class: "text-gray-500", "Date: {current.update_time}" }
-            )
-        }
-        None => rsx!(
-            div { class: "text-4xl font-bold text-base-content", "No Rate Available" }
-            p { class: "text-gray-500", "Date: N/A" }
-        ),
-    }
 }
 
 #[component]
