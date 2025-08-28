@@ -72,6 +72,65 @@ struct ChartData {
 const MAX_RETRIES: u32 = 10;
 
 #[component]
+pub fn ExtremeValues(
+    highest: Option<RateRecordWithLocalTime>,
+    lowest: Option<RateRecordWithLocalTime>,
+) -> Element {
+    let mut highest_rendered = use_signal(|| {
+        highest.as_ref().map(|record| RenderedRecord {
+            rate: record.rate.clone(),
+            update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
+        })
+    });
+
+    let mut lowest_rendered = use_signal(|| {
+        lowest.as_ref().map(|record| RenderedRecord {
+            rate: record.rate.clone(),
+            update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
+        })
+    });
+
+    #[cfg(feature = "web")]
+    use_effect(move || {
+        highest_rendered.set(highest.as_ref().map(|record| RenderedRecord {
+            rate: record.rate.clone(),
+            update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+        }));
+        lowest_rendered.set(lowest.as_ref().map(|record| RenderedRecord {
+            rate: record.rate.clone(),
+            update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+        }));
+    });
+
+    rsx! {
+        div { class: "grid grid-cols-1 @sm:grid-cols-2 gap-4 my-4",
+            div { class: "card bg-base-100",
+                div { class: "card-body text-center",
+                    h4 { class: "card-title justify-center", "Highest" }
+                    if let Some(record) = highest_rendered() {
+                        p { class: "text-2xl font-bold", "{record.rate}" }
+                        p { class: "text-xs text-base-content/60", "{record.update_time}" }
+                    } else {
+                        p { class: "text-2xl font-bold", "N/A" }
+                    }
+                }
+            }
+            div { class: "card bg-base-100",
+                div { class: "card-body text-center",
+                    h4 { class: "card-title justify-center", "Lowest" }
+                    if let Some(record) = lowest_rendered() {
+                        p { class: "text-2xl font-bold", "{record.rate}" }
+                        p { class: "text-xs text-base-content/60", "{record.update_time}" }
+                    } else {
+                        p { class: "text-2xl font-bold", "N/A" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn Main() -> Element {
     let records = use_server_future(get_rate)?.unwrap()?;
 
@@ -203,7 +262,7 @@ fn Main() -> Element {
     });
 
     #[cfg(feature = "web")]
-    use_future(move || async move {
+    use_effect(move || {
         current.set(
             records_local
                 .read_unchecked()
@@ -213,6 +272,35 @@ fn Main() -> Element {
                     update_time: record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
                 }),
         );
+    });
+
+    let extremes = use_memo(move || {
+        let records = records_local.read_unchecked();
+        if records.is_empty() {
+            return (None, None);
+        };
+
+        let mut high_rate = 0.0f64;
+        let mut low_rate = f64::MAX;
+        let mut high_index = 0;
+        let mut low_index = 0;
+
+        for (index, record) in records.iter().enumerate() {
+            let rate = record.rate.parse::<f64>().unwrap();
+            if rate > high_rate {
+                high_rate = rate;
+                high_index = index;
+            }
+            if rate < low_rate {
+                low_rate = rate;
+                low_index = index;
+            }
+        }
+
+        let high_record = records.get(high_index).cloned();
+        let low_record = records.get(low_index).cloned();
+
+        (high_record, low_record)
     });
 
     rsx!(
@@ -230,6 +318,10 @@ fn Main() -> Element {
                     }
                     RateContent { current: current()}
                 }
+            }
+            {
+                let (highest, lowest) = extremes();
+                rsx!(ExtremeValues { highest, lowest })
             }
             Chart { records: records_local }
         }

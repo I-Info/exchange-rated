@@ -13,10 +13,19 @@ pub struct RateRecord {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
 pub struct RateRecordWithLocalTime {
     pub rate: String,
     pub timestamp: DateTime<Local>,
 }
+
+impl PartialEq for RateRecordWithLocalTime {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp
+    }
+}
+
+impl Eq for RateRecordWithLocalTime {}
 
 impl From<RateRecord> for RateRecordWithLocalTime {
     fn from(record: RateRecord) -> Self {
