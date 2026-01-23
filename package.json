@@ -12,7 +12,7 @@
     "@tailwindcss/cli": "^4.1.12",
     "apexcharts": "^5.3.4",
     "flyonui": "^2.4.0",
-    "lodash": "^4.17.21",
+    "lodash": "^4.17.23",
     "tailwindcss": "^4.1.12"
   }
 }
