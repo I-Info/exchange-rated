@@ -24,8 +24,15 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
 
     // Send initial history to the client
     let history = state.get_history();
+    let cib_history = state.get_cib_history();
     let history_message = ServerEvent::History(history);
+    let cib_history_message = ServerEvent::CibHistory(cib_history);
     if let Ok(msg) = serde_json::to_string(&history_message)
+        && sender.send(ws::Message::Text(msg.into())).await.is_err()
+    {
+        return;
+    }
+    if let Ok(msg) = serde_json::to_string(&cib_history_message)
         && sender.send(ws::Message::Text(msg.into())).await.is_err()
     {
         return;
@@ -72,13 +79,17 @@ pub async fn sse_handler(
     Extension(state): Extension<AppState>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, anyhow::Error>>> {
     let history = state.get_history();
+    let cib_history = state.get_cib_history();
     let rx = state.subscribe();
-    let stream = stream::once(async { Ok(ServerEvent::History(history)) })
-        .chain(BroadcastStream::from(rx))
-        .map(|event| match event {
-            Ok(event) => Ok(Event::default().json_data(event)?),
-            Err(err) => Err(anyhow::Error::new(err)),
-        });
+    let stream = stream::iter(vec![
+        Ok(ServerEvent::History(history)),
+        Ok(ServerEvent::CibHistory(cib_history)),
+    ])
+    .chain(BroadcastStream::from(rx))
+    .map(|event| match event {
+        Ok(event) => Ok(Event::default().json_data(event)?),
+        Err(err) => Err(anyhow::Error::new(err)),
+    });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

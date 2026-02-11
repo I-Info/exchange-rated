@@ -1,11 +1,11 @@
 use super::models::*;
-use crate::models::{RateRecord, ServerEvent};
+use crate::models::{CibRateRecord, RateRecord, ServerEvent};
 
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use std::{collections::VecDeque, io::Write};
 
-use chrono::{DateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Timelike, Utc};
 use chrono_tz::Asia::Shanghai;
 use regex::Regex;
 use reqwest::header::AUTHORIZATION;
@@ -13,12 +13,15 @@ use reqwest::{
     Client,
     header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED},
 };
+use serde::Deserialize;
 use sqlx::Row;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 static URL: &str = "https://www.boc.cn/sourcedb/whpj/mfx_1620.html";
+static CIB_LIST_URL: &str =
+    "https://personalbank.cib.com.cn/pers/main/pubinfo/ifxQuotationQuery/list";
 
 static RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -26,6 +29,23 @@ static RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+static CIB_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"日期：\s*(\d{4})年(\d{2})月(\d{2})日\s*星期[一二三四五六日天]\s*(\d{2}):(\d{2}):(\d{2})"#,
+    )
+    .unwrap()
+});
+
+#[derive(Debug, Deserialize)]
+struct CibListResponse {
+    rows: Vec<CibRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CibRow {
+    cell: Vec<String>,
+}
 
 const RETRY: u32 = 3u32;
 
@@ -36,6 +56,7 @@ impl AppState {
             broadcast_tx,
             db_pool,
             rate_history: Arc::new(RwLock::new(VecDeque::new())),
+            cib_rate_history: Arc::new(RwLock::new(VecDeque::new())),
             extreme_values: Arc::new(RwLock::new(None)),
         }
     }
@@ -43,6 +64,9 @@ impl AppState {
     pub fn clean(&self) {
         let mut history = self.rate_history.write().unwrap();
         history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(5));
+
+        let mut cib_history = self.cib_rate_history.write().unwrap();
+        cib_history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(5));
     }
 
     pub fn add_rate(&self, record: &RateRecord) -> bool {
@@ -77,9 +101,51 @@ impl AppState {
         true
     }
 
+    pub fn add_cib_rate(&self, record: &CibRateRecord) -> bool {
+        {
+            let history = self.cib_rate_history.read().unwrap();
+
+            if let Some(last_record) = history.back()
+                && last_record.timestamp == record.timestamp
+            {
+                let mut stdout = std::io::stdout();
+                stdout.write_all(b"*").unwrap();
+                stdout.flush().unwrap();
+                return false;
+            }
+        }
+
+        println!(
+            "*\n[{}] New CIB Rate: {}",
+            record.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            record.rate
+        );
+
+        {
+            let mut history = self.cib_rate_history.write().unwrap();
+            history.push_back(record.clone());
+        };
+
+        // Broadcast the update to all connected WebSocket clients
+        let message = ServerEvent::CibRateUpdate(record.clone());
+        let _ = self.broadcast_tx.send(message);
+
+        true
+    }
+
     pub fn get_latest_rate(&self) -> Option<RateRecord> {
         let history = self.rate_history.read().unwrap();
         history.back().cloned()
+    }
+
+    pub fn get_latest_cib_rate(&self) -> Option<CibRateRecord> {
+        let history = self.cib_rate_history.read().unwrap();
+        history.back().cloned()
+    }
+
+    pub fn get_cib_history(&self) -> Vec<CibRateRecord> {
+        let history = self.cib_rate_history.read().unwrap();
+        history.iter().cloned().collect()
     }
 
     pub fn get_history(&self) -> Vec<RateRecord> {
@@ -111,7 +177,28 @@ impl AppState {
             history.push_back(RateRecord { rate, timestamp });
         }
 
-        println!("Loaded {} records from database", history.len());
+        let cib_rows = sqlx::query(
+            "SELECT rate, timestamp FROM cib_rate_records WHERE timestamp > $1 ORDER BY timestamp DESC",
+        )
+        .bind(five_days_ago)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut cib_history = self.cib_rate_history.write().unwrap();
+        cib_history.clear();
+
+        for row in cib_rows.into_iter().rev() {
+            let rate: String = row.get("rate");
+            let timestamp: DateTime<Utc> = row.get("timestamp");
+
+            cib_history.push_back(CibRateRecord { rate, timestamp });
+        }
+
+        println!(
+            "Loaded {} records from database (BOC), {} records from CIB",
+            history.len(),
+            cib_history.len()
+        );
         Ok(())
     }
 
@@ -120,10 +207,10 @@ impl AppState {
 
         if let Some(extreme_values) = &*self.extreme_values.read().unwrap()
             && extreme_values.high_timestamp >= five_days_ago
-                && extreme_values.low_timestamp >= five_days_ago
-            {
-                return Ok(Some(extreme_values.clone()));
-            }
+            && extreme_values.low_timestamp >= five_days_ago
+        {
+            return Ok(Some(extreme_values.clone()));
+        }
 
         let rows = sqlx::query(
             "SELECT rate, timestamp FROM rate_records WHERE timestamp >= ? ORDER BY timestamp;",
@@ -345,6 +432,43 @@ pub async fn persist_record(db_pool: sqlx::SqlitePool, record: RateRecord) {
     }
 }
 
+pub async fn persist_cib_record(db_pool: sqlx::SqlitePool, record: CibRateRecord) {
+    for r in 0..RETRY {
+        match sqlx::query("INSERT OR IGNORE INTO cib_rate_records (rate, timestamp) VALUES (?, ?);")
+            .bind(&record.rate)
+            .bind(record.timestamp)
+            .execute(&db_pool)
+            .await
+        {
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("Warning: Failed to persist CIB rate record: {e} ");
+                if r == RETRY - 1 {
+                    eprintln!("Failed to persist CIB rate record after {RETRY} retries: {e}");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+fn extract_cib_aud_spot_sell(snapshot: &CibQuoteSnapshot) -> Option<CibRateRecord> {
+    let quote = snapshot
+        .quotes
+        .iter()
+        .find(|quote| quote.currency_symbol == "AUD")?;
+    let rate = quote.spot_sell.trim();
+    if rate.is_empty() {
+        return None;
+    }
+
+    Some(CibRateRecord {
+        rate: rate.to_string(),
+        timestamp: snapshot.as_of,
+    })
+}
+
 pub async fn fetch_sell_rate(
     client: &Client,
     cache_info: &mut Option<CacheInfo>,
@@ -449,6 +573,88 @@ pub async fn fetch_sell_rate(
     }
 }
 
+fn parse_cib_as_of_from_html(html: &str) -> Option<DateTime<Utc>> {
+    let caps = CIB_DATE_RE.captures(html)?;
+    let year = caps.get(1)?.as_str().parse::<i32>().ok()?;
+    let month = caps.get(2)?.as_str().parse::<u32>().ok()?;
+    let day = caps.get(3)?.as_str().parse::<u32>().ok()?;
+    let hour = caps.get(4)?.as_str().parse::<u32>().ok()?;
+    let minute = caps.get(5)?.as_str().parse::<u32>().ok()?;
+    let second = caps.get(6)?.as_str().parse::<u32>().ok()?;
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+    let local = Shanghai.from_local_datetime(&naive).single()?;
+    Some(local.with_timezone(&Utc))
+}
+
+fn parse_cib_quotes_from_json(
+    json: &str,
+    as_of: DateTime<Utc>,
+) -> Result<CibQuoteSnapshot, serde_json::Error> {
+    let list: CibListResponse = serde_json::from_str(json)?;
+    let mut quotes = Vec::with_capacity(list.rows.len());
+
+    for row in list.rows {
+        if row.cell.len() < 7 {
+            continue;
+        }
+
+        quotes.push(CibQuote {
+            currency_name: row.cell[0].clone(),
+            currency_symbol: row.cell[1].clone(),
+            unit: row.cell[2].clone(),
+            spot_buy: row.cell[3].clone(),
+            spot_sell: row.cell[4].clone(),
+            cash_buy: row.cell[5].clone(),
+            cash_sell: row.cell[6].clone(),
+        });
+    }
+
+    Ok(CibQuoteSnapshot { as_of, quotes })
+}
+
+pub async fn fetch_cib_quotes(
+    client: &Client,
+) -> Result<CibQuoteSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let bootstrap = client
+        .get("https://personalbank.cib.com.cn/pers/main/pubinfo/ifxQuotationQuery.do")
+        .send()
+        .await?;
+    let cookie_header = bootstrap
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let bootstrap_body = bootstrap.text().await?;
+    let as_of = parse_cib_as_of_from_html(&bootstrap_body).unwrap_or_else(Utc::now);
+
+    let nd = Utc::now().timestamp_millis().to_string();
+    let mut request = client
+        .get(CIB_LIST_URL)
+        .query(&[
+            ("_search", "false"),
+            ("dataSet.nd", nd.as_str()),
+            ("dataSet.rows", "80"),
+            ("dataSet.page", "1"),
+            ("dataSet.sidx", ""),
+            ("dataSet.sord", "asc"),
+        ])
+        .header("X-Requested-With", "XMLHttpRequest");
+
+    if !cookie_header.is_empty() {
+        request = request.header(reqwest::header::COOKIE, cookie_header);
+    }
+
+    let response = request.send().await?;
+    let body = response.text().await?;
+    let snapshot = parse_cib_quotes_from_json(&body, as_of)
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })?;
+
+    Ok(snapshot)
+}
+
 pub async fn rate_fetcher(state: AppState, ntfy: Option<Ntfy>) {
     let client = Client::builder()
         .user_agent(
@@ -474,6 +680,34 @@ pub async fn rate_fetcher(state: AppState, ntfy: Option<Ntfy>) {
             };
 
             tokio::spawn(persist_record(state.db_pool.clone(), current_rate));
+        }
+
+        sleep(Duration::from_millis(rand::random_range(1000..5000))).await;
+    }
+}
+
+pub async fn cib_rate_fetcher(state: AppState) {
+    let client = Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
+        )
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    loop {
+        match fetch_cib_quotes(&client).await {
+            Ok(snapshot) => {
+                if let Some(record) = extract_cib_aud_spot_sell(&snapshot)
+                    && state.add_cib_rate(&record)
+                {
+                    tokio::spawn(persist_cib_record(state.db_pool.clone(), record));
+                }
+            }
+            Err(err) => {
+                eprintln!("*\\nCIB fetch failed: {err}");
+            }
         }
 
         sleep(Duration::from_millis(rand::random_range(1000..5000))).await;
@@ -540,6 +774,45 @@ mod tests {
     use chrono::Utc;
     use dotenv::dotenv;
     use std::time::Duration;
+
+    #[test]
+    fn test_parse_cib_aud_spot_sell() {
+        let json = r#"{"rows":[{"cell":["澳大利亚元","AUD","100.00","490.07","494.00","474.58","493.76"]}]}"#;
+        let as_of = Utc::now();
+        let snapshot = parse_cib_quotes_from_json(json, as_of).unwrap();
+
+        let aud = snapshot
+            .quotes
+            .iter()
+            .find(|quote| quote.currency_symbol == "AUD")
+            .expect("AUD quote should exist");
+
+        assert_eq!(aud.spot_sell, "494.00");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_cib_aud_spot_sell_live() {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        let snapshot = fetch_cib_quotes(&client)
+            .await
+            .expect("fetch CIB quotes should succeed");
+
+        let aud = snapshot
+            .quotes
+            .iter()
+            .find(|quote| quote.currency_symbol == "AUD")
+            .expect("AUD quote should exist");
+
+        assert!(
+            !aud.spot_sell.trim().is_empty(),
+            "AUD spot sell should not be empty"
+        );
+    }
 
     #[tokio::test]
     async fn test_ntfy() {

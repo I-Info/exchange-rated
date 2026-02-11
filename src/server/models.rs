@@ -1,4 +1,4 @@
-use crate::models::{RateRecord, ServerEvent};
+use crate::models::{CibRateRecord, RateRecord, ServerEvent};
 
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -36,6 +36,7 @@ pub struct RateDisplay {
 #[derive(Clone)]
 pub struct AppState {
     pub rate_history: Arc<RwLock<VecDeque<RateRecord>>>,
+    pub cib_rate_history: Arc<RwLock<VecDeque<CibRateRecord>>>,
     pub broadcast_tx: broadcast::Sender<ServerEvent>,
     pub extreme_values: Arc<RwLock<Option<ExtremeValues>>>,
     pub db_pool: sqlx::SqlitePool,
@@ -45,4 +46,21 @@ pub struct AppState {
 pub struct CacheInfo {
     // etag: String,
     pub last_modified: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CibQuote {
+    pub currency_name: String,
+    pub currency_symbol: String,
+    pub unit: String,
+    pub spot_buy: String,
+    pub spot_sell: String,
+    pub cash_buy: String,
+    pub cash_sell: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CibQuoteSnapshot {
+    pub as_of: DateTime<Utc>,
+    pub quotes: Vec<CibQuote>,
 }

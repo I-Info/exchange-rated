@@ -5,7 +5,7 @@ mod utils;
 
 use self::handlers::{sse_handler, websocket_handler};
 use self::models::AppState;
-use self::services::{Ntfy, cleaner, rate_fetcher};
+use self::services::{Ntfy, cib_rate_fetcher, cleaner, rate_fetcher};
 use self::utils::{load_ntfy_config, wait_for_shutdown_signal};
 
 use axum::routing::get;
@@ -65,6 +65,9 @@ pub async fn launch_server(component: fn() -> Element) {
 
     // Start the rate fetcher in the background
     tasks.push(tokio::spawn(rate_fetcher(state.clone(), ntfy)));
+
+    // Start the CIB rate fetcher in the background
+    tasks.push(tokio::spawn(cib_rate_fetcher(state.clone())));
 
     tasks.push(tokio::spawn(async move {
         // Get the address the server should run on. If the CLI is running, the CLI proxies fullstack into the main address
