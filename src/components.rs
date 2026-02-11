@@ -3,10 +3,10 @@ use crate::models::{RateRecord, RateRecordWithLocalTime};
 use dioxus::prelude::*;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
-const TAILWIND_CSS: Asset = asset!("./assets/tailwind.css");
-const APEXCHART_CSS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.css");
-const APEXCHART_JS: Asset = asset!("./node_modules/apexcharts/dist/apexcharts.min.js");
-const LODASH_JS: Asset = asset!("./node_modules/lodash/lodash.min.js");
+const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+const APEXCHART_CSS: Asset = asset!("/node_modules/apexcharts/dist/apexcharts.css");
+const APEXCHART_JS: Asset = asset!("/node_modules/apexcharts/dist/apexcharts.min.js");
+const LODASH_JS: Asset = asset!("/node_modules/lodash/lodash.min.js");
 
 #[derive(Clone, Debug)]
 struct RenderedRecord {
@@ -541,7 +541,8 @@ pub fn Chart(records: Signal<Vec<RateRecordWithLocalTime>>) -> Element {
 
 #[server]
 async fn get_rate() -> ServerFnResult<Vec<RateRecord>> {
-    let FromContext::<crate::server::models::AppState>(state) = extract().await?;
+    let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
+        FullstackContext::extract().await?;
 
     Ok(state.get_history())
 }

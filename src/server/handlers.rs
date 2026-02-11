@@ -2,7 +2,7 @@ use super::models::AppState;
 use crate::models::ServerEvent;
 
 use axum::{
-    extract::{State, WebSocketUpgrade, ws},
+    extract::{Extension, WebSocketUpgrade, ws},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -13,7 +13,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
-    State(state): State<AppState>,
+    Extension(state): Extension<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
@@ -26,9 +26,10 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
     let history = state.get_history();
     let history_message = ServerEvent::History(history);
     if let Ok(msg) = serde_json::to_string(&history_message)
-        && sender.send(ws::Message::Text(msg.into())).await.is_err() {
-            return;
-        }
+        && sender.send(ws::Message::Text(msg.into())).await.is_err()
+    {
+        return;
+    }
 
     // Handle incoming messages from client
     let recv_task = tokio::spawn(async move {
@@ -47,9 +48,9 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
                     .send(ws::Message::Text(json_msg.into()))
                     .await
                     .is_err()
-                {
-                    break;
-                }
+            {
+                break;
+            }
         }
     });
 
@@ -68,7 +69,7 @@ async fn handle_socket(socket: ws::WebSocket, state: AppState) {
 }
 
 pub async fn sse_handler(
-    State(state): State<AppState>,
+    Extension(state): Extension<AppState>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, anyhow::Error>>> {
     let history = state.get_history();
     let rx = state.subscribe();

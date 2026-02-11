@@ -11,7 +11,6 @@ use self::utils::{load_ntfy_config, wait_for_shutdown_signal};
 use axum::routing::get;
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
-use dioxus::server::ServeConfigBuilder;
 
 async fn init_db() -> sqlx::SqlitePool {
     // Initialize database
@@ -74,15 +73,18 @@ pub async fn launch_server(component: fn() -> Element) {
         info!("Launching server on {addr}");
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
-        // Add server state to dioxus context, which can be accessed by server functions
-        let conf = ServeConfigBuilder::new().context(state.clone());
+        // Attach server state to Dioxus routes via axum Extension (used by FullstackContext::extract)
+        let state_for_extension = state.clone();
+        let dioxus_router = axum::Router::new()
+            // serve_dioxus_application adds routes to server side render the application, serve static assets, and register server functions
+            .serve_dioxus_application(ServeConfig::new(), component)
+            .layer(axum::Extension(state_for_extension));
 
         let router = axum::Router::new()
-            // serve_dioxus_application adds routes to server side render the application, serve static assets, and register server functions
-            .serve_dioxus_application(conf.build().unwrap(), component)
             .route("/ws", get(websocket_handler))
             .route("/sse", get(sse_handler))
-            .with_state(state);
+            .layer(axum::Extension(state))
+            .fallback_service(dioxus_router.into_service());
         axum::serve(listener, router).await.unwrap();
     }));
 
