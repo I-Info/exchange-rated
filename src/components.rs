@@ -365,7 +365,7 @@ fn Main() -> Element {
                 let candidate = (
                     candle.high,
                     RateRecordWithLocalTime {
-                        rate: format!("{:.4}", candle.high),
+                        rate: format!("{:.2}", candle.high),
                         timestamp: candle.start_timestamp.with_timezone(&Local),
                     },
                 );
@@ -383,7 +383,7 @@ fn Main() -> Element {
                 let candidate = (
                     candle.low,
                     RateRecordWithLocalTime {
-                        rate: format!("{:.4}", candle.low),
+                        rate: format!("{:.2}", candle.low),
                         timestamp: candle.start_timestamp.with_timezone(&Local),
                     },
                 );
