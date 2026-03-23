@@ -1,6 +1,6 @@
 use crate::models::{Candle, CibRateRecord, RateRecord, RateRecordWithLocalTime};
 
-use chrono::{DateTime, Duration, Local, TimeZone, Utc};
+use chrono::{Duration, Local, Utc};
 use dioxus::prelude::*;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -90,6 +90,7 @@ pub fn ExtremeValues(
     highest: Option<RateRecordWithLocalTime>,
     lowest: Option<RateRecordWithLocalTime>,
 ) -> Element {
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut highest_rendered = use_signal(|| {
         highest.as_ref().map(|record| RenderedRecord {
             rate: record.rate.clone(),
@@ -97,6 +98,7 @@ pub fn ExtremeValues(
         })
     });
 
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut lowest_rendered = use_signal(|| {
         lowest.as_ref().map(|record| RenderedRecord {
             rate: record.rate.clone(),
@@ -149,7 +151,7 @@ fn Main() -> Element {
     let records = use_server_future(get_rate)?.unwrap()?;
     let cib_records = use_server_future(get_cib_history)?.unwrap()?;
 
-    #[allow(unused_mut)]
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut records_local: Signal<Vec<RateRecordWithLocalTime>> = use_signal(|| {
         records
             .iter()
@@ -157,12 +159,14 @@ fn Main() -> Element {
             .collect::<Vec<_>>()
     });
 
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut cib_latest: Signal<Option<CibRateRecord>> = use_signal(|| None);
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut cib_history: Signal<Vec<CibRateRecord>> = use_signal(|| cib_records.clone());
 
     let candles = use_server_future(move || get_candles())?;
 
-    #[allow(unused_mut)]
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut connection_status = use_signal(|| ConnectionStatus::Connecting);
 
     #[cfg(feature = "web")]
@@ -297,6 +301,7 @@ fn Main() -> Element {
         }
     });
 
+    #[cfg_attr(not(feature = "web"), allow(unused_mut))]
     let mut current = use_signal(move || {
         records_local
             .read_unchecked()
@@ -874,10 +879,12 @@ async fn get_cib_history() -> ServerFnResult<Vec<CibRateRecord>> {
 
 #[server]
 async fn get_candles() -> ServerFnResult<Vec<Candle>> {
+    use chrono::{DateTime, TimeZone};
+
     let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
         FullstackContext::extract().await?;
 
-    let mut records = state.get_history();
+    let records = state.get_history();
 
     let interval = Duration::hours(4);
     let interval_secs = interval.num_seconds();
