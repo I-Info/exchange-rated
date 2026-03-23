@@ -17,16 +17,17 @@ path = "src/main.rs"
 dioxus = { version = "0.7.3", features = ["fullstack"] }
 serde = { version = "1.0" }
 serde_json = { version = "1.0" }
-futures = "0.3.31"
+futures = "0.3.32"
 chrono = { version = "0.4", features = ["serde"] }
 # Server dependencies
 tokio = { version = "1", features = ["full"], optional = true }
-rand = { version = "0.9.2", optional = true }
-reqwest = { version = "0.12", features = [
+rand = { version = "0.10.0", optional = true }
+reqwest = { version = "0.13", features = [
     "json",
     "gzip",
     "brotli",
     "deflate",
+    "query"
 ], optional = true }
 regex = { version = "1.12.3", optional = true }
 axum = { version = "0.8.8", features = ["ws"], optional = true }
@@ -40,12 +41,12 @@ sqlx = { version = "0.8.6", features = [
 chrono-tz = { version = "0.10", optional = true }
 dotenv = { version = "0.15", optional = true }
 tokio-stream = { version = "0.1.18", features = ["sync"], optional = true }
-anyhow = { version = "1.0.101", optional = true }
+anyhow = { version = "1.0.102", optional = true }
 # Web dependencies
 gloo-net = { version = "0.6.0", optional = true }
 gloo-utils = { version = "0.2.0", features = ["serde"], optional = true }
 gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
-web-sys = { version = "0.3.85", optional = true }
+web-sys = { version = "0.3.91", optional = true }
 
 [features]
 default = ["server"]
