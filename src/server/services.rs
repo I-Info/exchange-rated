@@ -63,10 +63,10 @@ impl AppState {
 
     pub fn clean(&self) {
         let mut history = self.rate_history.write().unwrap();
-        history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(5));
+        history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(15));
 
         let mut cib_history = self.cib_rate_history.write().unwrap();
-        cib_history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(5));
+        cib_history.retain(|record| record.timestamp > Utc::now() - chrono::Duration::days(15));
     }
 
     pub fn add_rate(&self, record: &RateRecord) -> bool {
