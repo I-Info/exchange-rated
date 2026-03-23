@@ -80,6 +80,11 @@ struct CandleSeriesPoint {
 #[cfg(feature = "web")]
 const MAX_RETRIES: u32 = 10;
 
+const DETAIL_HISTORY_WINDOW_HOURS: i64 = 48;
+
+#[cfg(feature = "web")]
+const CHART_ZOOM_WINDOW_HOURS: i64 = 24;
+
 #[component]
 pub fn ExtremeValues(
     highest: Option<RateRecordWithLocalTime>,
@@ -155,7 +160,7 @@ fn Main() -> Element {
     let mut cib_latest: Signal<Option<CibRateRecord>> = use_signal(|| None);
     let mut cib_history: Signal<Vec<CibRateRecord>> = use_signal(|| cib_records.clone());
 
-    let candles = use_server_future(move || get_candles(4))?;
+    let candles = use_server_future(move || get_candles())?;
 
     #[allow(unused_mut)]
     let mut connection_status = use_signal(|| ConnectionStatus::Connecting);
@@ -214,28 +219,41 @@ fn Main() -> Element {
                             Ok(ServerEvent::RateUpdate(record)) => {
                                 let mut r = records_local.write();
                                 r.push(record.into());
+                                let cutoff =
+                                    Local::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+                                r.retain(|item| item.timestamp >= cutoff);
                                 tracing::debug!("Rate Update received.");
                             }
                             Ok(ServerEvent::CibRateUpdate(record)) => {
                                 let mut history = cib_history.write();
                                 history.push(record.clone());
+                                let cutoff =
+                                    Utc::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+                                history.retain(|item| item.timestamp >= cutoff);
                                 cib_latest.set(Some(record));
                                 tracing::debug!("CIB rate update received.");
                             }
                             Ok(ServerEvent::History(records)) => {
-                                records_local.set(
-                                    records
-                                        .into_iter()
-                                        .map(RateRecordWithLocalTime::from)
-                                        .collect::<Vec<_>>(),
-                                );
+                                let cutoff =
+                                    Local::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+                                let mut next_records = records
+                                    .into_iter()
+                                    .map(RateRecordWithLocalTime::from)
+                                    .collect::<Vec<_>>();
+                                next_records.retain(|item| item.timestamp >= cutoff);
+                                records_local.set(next_records);
                                 tracing::debug!("History received.");
                             }
                             Ok(ServerEvent::CibHistory(records)) => {
-                                if let Some(latest) = records.last().cloned() {
+                                let cutoff =
+                                    Utc::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+                                let mut next_records = records;
+                                next_records.retain(|item| item.timestamp >= cutoff);
+
+                                if let Some(latest) = next_records.last().cloned() {
                                     cib_latest.set(Some(latest));
                                 }
-                                cib_history.set(records);
+                                cib_history.set(next_records);
                                 tracing::debug!("CIB history received.");
                             }
                             Err(err) => {
@@ -304,37 +322,110 @@ fn Main() -> Element {
 
     let extremes = use_memo(move || {
         let records = records_local.read_unchecked();
-        if records.is_empty() {
-            return (None, None);
-        };
 
-        let mut high_rate = 0.0f64;
-        let mut low_rate = f64::MAX;
-        let mut high_index = 0;
-        let mut low_index = 0;
+        let mut history_high: Option<(f64, RateRecordWithLocalTime)> = None;
+        let mut history_low: Option<(f64, RateRecordWithLocalTime)> = None;
 
-        for (index, record) in records.iter().enumerate() {
-            let rate = record.rate.parse::<f64>().unwrap();
-            if rate > high_rate {
-                high_rate = rate;
-                high_index = index;
+        for record in records.iter() {
+            let Ok(rate) = record.rate.parse::<f64>() else {
+                continue;
+            };
+
+            if history_high
+                .as_ref()
+                .map(|(current, _)| rate > *current)
+                .unwrap_or(true)
+            {
+                history_high = Some((rate, record.clone()));
             }
-            if rate < low_rate {
-                low_rate = rate;
-                low_index = index;
+
+            if history_low
+                .as_ref()
+                .map(|(current, _)| rate < *current)
+                .unwrap_or(true)
+            {
+                history_low = Some((rate, record.clone()));
             }
         }
 
-        let high_record = records.get(high_index).cloned();
-        let low_record = records.get(low_index).cloned();
+        let candle_snapshot = candles.read_unchecked();
+        let candles = match &*candle_snapshot {
+            Some(Ok(candles)) => candles.clone(),
+            Some(Err(_)) | None => {
+                return (
+                    history_high.map(|(_, record)| record),
+                    history_low.map(|(_, record)| record),
+                );
+            }
+        };
 
-        (high_record, low_record)
+        let candle_high = candles.iter().fold(
+            None,
+            |acc: Option<(f64, RateRecordWithLocalTime)>, candle| {
+                let candidate = (
+                    candle.high,
+                    RateRecordWithLocalTime {
+                        rate: format!("{:.4}", candle.high),
+                        timestamp: candle.start_timestamp.with_timezone(&Local),
+                    },
+                );
+
+                match acc {
+                    Some(current) if current.0 >= candidate.0 => Some(current),
+                    _ => Some(candidate),
+                }
+            },
+        );
+
+        let candle_low = candles.iter().fold(
+            None,
+            |acc: Option<(f64, RateRecordWithLocalTime)>, candle| {
+                let candidate = (
+                    candle.low,
+                    RateRecordWithLocalTime {
+                        rate: format!("{:.4}", candle.low),
+                        timestamp: candle.start_timestamp.with_timezone(&Local),
+                    },
+                );
+
+                match acc {
+                    Some(current) if current.0 <= candidate.0 => Some(current),
+                    _ => Some(candidate),
+                }
+            },
+        );
+
+        let highest = match (history_high, candle_high) {
+            (Some(history), Some(candle)) => Some(if history.0 >= candle.0 {
+                history.1
+            } else {
+                candle.1
+            }),
+            (Some(history), None) => Some(history.1),
+            (None, Some(candle)) => Some(candle.1),
+            (None, None) => None,
+        };
+
+        let lowest = match (history_low, candle_low) {
+            (Some(history), Some(candle)) => Some(if history.0 <= candle.0 {
+                history.1
+            } else {
+                candle.1
+            }),
+            (Some(history), None) => Some(history.1),
+            (None, Some(candle)) => Some(candle.1),
+            (None, None) => None,
+        };
+
+        (highest, lowest)
     });
 
     // indicate rate delta
     let delta = use_memo(move || {
         if let Some(last) = records_local.last() {
-            if let Some(prev) = records_local.get(records_local.len() - 2) {
+            if let Some(prev_index) = records_local.len().checked_sub(2)
+                && let Some(prev) = records_local.get(prev_index)
+            {
                 let delta = last.rate.parse::<f64>().unwrap() - prev.rate.parse::<f64>().unwrap();
                 Some(delta)
             } else {
@@ -587,18 +678,6 @@ pub fn Chart(
             .call1(&instance, &JsValue::from_serde(&series).unwrap())
             .unwrap();
 
-        let today = Local::now().date_naive();
-        let day_start = Local
-            .from_local_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
-            .single()
-            .unwrap()
-            .timestamp_millis();
-        let day_end = Local
-            .from_local_datetime(&today.and_hms_milli_opt(23, 59, 59, 999).unwrap())
-            .single()
-            .unwrap()
-            .timestamp_millis();
-
         let data_bounds = records
             .iter()
             .map(|point| point.x)
@@ -614,14 +693,9 @@ pub fn Chart(
             return;
         };
 
-        let overlap_start = day_start.max(data_start);
-        let overlap_end = day_end.min(data_end);
-
-        let (mut zoom_start, mut zoom_end) = if overlap_start < overlap_end {
-            (overlap_start, overlap_end)
-        } else {
-            (data_start, data_end)
-        };
+        let zoom_window_ms = CHART_ZOOM_WINDOW_HOURS * 60 * 60 * 1000;
+        let mut zoom_end = data_end;
+        let mut zoom_start = data_end.saturating_sub(zoom_window_ms).max(data_start);
 
         if zoom_start == zoom_end {
             let pad_ms = 30 * 60 * 1000;
@@ -777,7 +851,12 @@ async fn get_rate() -> ServerFnResult<Vec<RateRecord>> {
     let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
         FullstackContext::extract().await?;
 
-    Ok(state.get_history())
+    let cutoff = Utc::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+    Ok(state
+        .get_history()
+        .into_iter()
+        .filter(|record| record.timestamp >= cutoff)
+        .collect())
 }
 
 #[server]
@@ -785,19 +864,22 @@ async fn get_cib_history() -> ServerFnResult<Vec<CibRateRecord>> {
     let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
         FullstackContext::extract().await?;
 
-    Ok(state.get_cib_history())
+    let cutoff = Utc::now() - Duration::hours(DETAIL_HISTORY_WINDOW_HOURS);
+    Ok(state
+        .get_cib_history()
+        .into_iter()
+        .filter(|record| record.timestamp >= cutoff)
+        .collect())
 }
 
 #[server]
-async fn get_candles(interval_hours: i64) -> ServerFnResult<Vec<Candle>> {
+async fn get_candles() -> ServerFnResult<Vec<Candle>> {
     let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
         FullstackContext::extract().await?;
 
     let mut records = state.get_history();
-    records.sort_by_key(|record| record.timestamp);
 
-    let interval_hours = interval_hours.max(1);
-    let interval = Duration::hours(interval_hours);
+    let interval = Duration::hours(4);
     let interval_secs = interval.num_seconds();
 
     let mut candles = Vec::new();

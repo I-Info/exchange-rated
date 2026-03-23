@@ -158,12 +158,12 @@ impl AppState {
     }
 
     pub async fn load_from_db(&self) -> Result<(), sqlx::Error> {
-        let five_days_ago = Utc::now() - chrono::Duration::days(5);
+        let fifteen_days_ago = Utc::now() - chrono::Duration::days(15);
 
         let rows = sqlx::query(
             "SELECT rate, timestamp FROM rate_records WHERE timestamp > $1 ORDER BY timestamp DESC",
         )
-        .bind(five_days_ago)
+        .bind(fifteen_days_ago)
         .fetch_all(&self.db_pool)
         .await?;
 
@@ -180,7 +180,7 @@ impl AppState {
         let cib_rows = sqlx::query(
             "SELECT rate, timestamp FROM cib_rate_records WHERE timestamp > $1 ORDER BY timestamp DESC",
         )
-        .bind(five_days_ago)
+        .bind(fifteen_days_ago)
         .fetch_all(&self.db_pool)
         .await?;
 
@@ -203,7 +203,7 @@ impl AppState {
     }
 
     pub async fn get_history_extremes(&self) -> Result<Option<ExtremeValues>, sqlx::Error> {
-        let five_days_ago = Utc::now() - chrono::Duration::days(5);
+        let five_days_ago = Utc::now() - chrono::Duration::days(7);
 
         if let Some(extreme_values) = &*self.extreme_values.read().unwrap()
             && extreme_values.high_timestamp >= five_days_ago
