@@ -31,20 +31,6 @@ pub struct Candle {
     pub end_timestamp: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IndicatorPoint {
-    pub timestamp: DateTime<Utc>,
-    pub value: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MacdRsiSeries {
-    pub macd: Vec<IndicatorPoint>,
-    pub signal: Vec<IndicatorPoint>,
-    pub histogram: Vec<IndicatorPoint>,
-    pub rsi: Vec<IndicatorPoint>,
-}
-
 #[derive(Clone, Debug)]
 pub struct RateRecordWithLocalTime {
     pub rate: String,

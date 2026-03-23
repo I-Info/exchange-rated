@@ -1,6 +1,4 @@
-use crate::models::{
-    Candle, CibRateRecord, IndicatorPoint, MacdRsiSeries, RateRecord, RateRecordWithLocalTime,
-};
+use crate::models::{Candle, CibRateRecord, RateRecord, RateRecordWithLocalTime};
 
 use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 use dioxus::prelude::*;
@@ -157,9 +155,7 @@ fn Main() -> Element {
     let mut cib_latest: Signal<Option<CibRateRecord>> = use_signal(|| None);
     let mut cib_history: Signal<Vec<CibRateRecord>> = use_signal(|| cib_records.clone());
 
-    let mut candle_interval_hours = use_signal(|| 4i64);
-    let candles = use_server_future(move || get_candles(candle_interval_hours()))?;
-    let indicators = use_server_future(move || get_indicators(candle_interval_hours()))?;
+    let candles = use_server_future(move || get_candles(4))?;
 
     #[allow(unused_mut)]
     let mut connection_status = use_signal(|| ConnectionStatus::Connecting);
@@ -392,7 +388,7 @@ fn Main() -> Element {
                                     }
                                     p { class: "text-gray-500", "{current.update_time}" }
                                     div { class: "mt-2 text-sm text-base-content/70",
-                                        span { class: "font-medium", "CIB参考价：" }
+                                        span { class: "font-medium", "CIB: " }
                                         if let Some(cib) = &*cib_latest.read_unchecked() {
                                             span { "{cib.rate}" }
                                             span { class: "ml-2 text-xs text-base-content/50", {cib.timestamp.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()} }
@@ -421,29 +417,9 @@ fn Main() -> Element {
                 div { class: "card-body",
                     div { class: "mb-4 flex flex-wrap items-center gap-2",
                         h3 { class: "card-title", "Candlestick" }
-                        div { class: "ml-auto flex gap-2",
-                            button {
-                                class: if candle_interval_hours() == 4 { "btn btn-sm btn-primary" } else { "btn btn-sm btn-ghost" },
-                                onclick: move |_| candle_interval_hours.set(4),
-                                "4h"
-                            }
-                            button {
-                                class: if candle_interval_hours() == 24 { "btn btn-sm btn-primary" } else { "btn btn-sm btn-ghost" },
-                                onclick: move |_| candle_interval_hours.set(24),
-                                "1d"
-                            }
-                        }
+                        span { class: "ml-auto badge badge-primary badge-soft", "4h" }
                     }
                     CandlestickChart { candles }
-                }
-            }
-            div { class: "card my-4 w-full",
-                div { class: "card-body",
-                    h3 { class: "card-title", "Indicators" }
-                    div { class: "grid gap-4 @md:grid-cols-2",
-                        MacdChart { indicators }
-                        RsiChart { indicators }
-                    }
                 }
             }
         }
@@ -492,6 +468,10 @@ pub fn Chart(
         use gloo_utils::format::JsValueSerdeExt;
         use web_sys::js_sys::{Array, Function, Reflect};
         use web_sys::wasm_bindgen::{JsCast, JsValue};
+
+        if chart_instance.read_unchecked().is_some() {
+            return;
+        }
 
         let el = if let Some(event) = &*chart_element.read_unchecked() {
             event.as_web_event()
@@ -606,6 +586,58 @@ pub fn Chart(
         update_series_fn
             .call1(&instance, &JsValue::from_serde(&series).unwrap())
             .unwrap();
+
+        let today = Local::now().date_naive();
+        let day_start = Local
+            .from_local_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let day_end = Local
+            .from_local_datetime(&today.and_hms_milli_opt(23, 59, 59, 999).unwrap())
+            .single()
+            .unwrap()
+            .timestamp_millis();
+
+        let data_bounds = records
+            .iter()
+            .map(|point| point.x)
+            .chain(cib_records.iter().map(|point| point.x))
+            .fold(None, |acc: Option<(i64, i64)>, ts| match acc {
+                Some((min_ts, max_ts)) => Some((min_ts.min(ts), max_ts.max(ts))),
+                None => Some((ts, ts)),
+            });
+
+        let (data_start, data_end) = if let Some(bounds) = data_bounds {
+            bounds
+        } else {
+            return;
+        };
+
+        let overlap_start = day_start.max(data_start);
+        let overlap_end = day_end.min(data_end);
+
+        let (mut zoom_start, mut zoom_end) = if overlap_start < overlap_end {
+            (overlap_start, overlap_end)
+        } else {
+            (data_start, data_end)
+        };
+
+        if zoom_start == zoom_end {
+            let pad_ms = 30 * 60 * 1000;
+            zoom_start = zoom_start.saturating_sub(pad_ms);
+            zoom_end = zoom_end.saturating_add(pad_ms);
+        }
+
+        let zoom_x_fn = Reflect::get(&instance, &JsValue::from_str("zoomX")).unwrap();
+        let zoom_x_fn: &Function = zoom_x_fn.dyn_ref().unwrap();
+        zoom_x_fn
+            .call2(
+                &instance,
+                &JsValue::from_f64(zoom_start as f64),
+                &JsValue::from_f64(zoom_end as f64),
+            )
+            .unwrap();
     });
 
     rsx! {
@@ -631,6 +663,10 @@ pub fn CandlestickChart(candles: Resource<ServerFnResult<Vec<Candle>>>) -> Eleme
         use gloo_utils::format::JsValueSerdeExt;
         use web_sys::js_sys::{Array, Function, Reflect};
         use web_sys::wasm_bindgen::{JsCast, JsValue};
+
+        if chart_instance.read_unchecked().is_some() {
+            return;
+        }
 
         let el = if let Some(event) = &*chart_element.read_unchecked() {
             event.as_web_event()
@@ -736,276 +772,6 @@ pub fn CandlestickChart(candles: Resource<ServerFnResult<Vec<Candle>>>) -> Eleme
     }
 }
 
-#[component]
-pub fn MacdChart(indicators: Resource<ServerFnResult<MacdRsiSeries>>) -> Element {
-    let mut chart_element: Signal<Option<Event<MountedData>>> = use_signal(|| None);
-    #[cfg(feature = "web")]
-    let mut chart_instance: Signal<Option<web_sys::wasm_bindgen::JsValue>> = use_signal(|| None);
-
-    #[cfg(feature = "web")]
-    use_effect(move || {
-        use dioxus::web::WebEventExt;
-        use gloo_utils::format::JsValueSerdeExt;
-        use web_sys::js_sys::{Array, Function, Reflect};
-        use web_sys::wasm_bindgen::{JsCast, JsValue};
-
-        let el = if let Some(event) = &*chart_element.read_unchecked() {
-            event.as_web_event()
-        } else {
-            return;
-        };
-
-        let window = web_sys::window().unwrap();
-        let apexcharts = Reflect::get(&window, &JsValue::from_str("ApexCharts")).unwrap();
-        let apexcharts_fn: &Function = apexcharts.dyn_ref().unwrap();
-        let param_array = Array::new();
-        param_array.push(&el);
-        param_array.push(
-            &JsValue::from_serde(&serde_json::json!({
-                "series": [],
-                "chart": {
-                    "type": "line",
-                    "height": 300,
-                    "toolbar": { "show": false }
-                },
-                "stroke": { "width": [2, 2, 0] },
-                "plotOptions": {
-                    "bar": { "columnWidth": "60%" }
-                },
-                "dataLabels": { "enabled": false },
-                "xaxis": {
-                    "type": "datetime",
-                    "labels": {
-                        "datetimeUTC": false,
-                        "style": {
-                            "colors": "var(--color-base-content)",
-                            "fontSize": "12px"
-                        }
-                    }
-                },
-                "yaxis": {
-                    "labels": {
-                        "style": {
-                            "colors": "var(--color-base-content)",
-                            "fontSize": "12px"
-                        }
-                    }
-                },
-                "tooltip": {
-                    "x": { "format": "MMM dd HH:mm" }
-                }
-            }))
-            .unwrap(),
-        );
-        let instance = Reflect::construct(apexcharts_fn, &param_array).unwrap();
-
-        let render_fn = Reflect::get(&instance, &JsValue::from_str("render")).unwrap();
-        let render_fn: &Function = render_fn.dyn_ref().unwrap();
-        render_fn.call0(&instance).unwrap();
-
-        chart_instance.set(Some(instance));
-    });
-
-    #[cfg(feature = "web")]
-    use_effect(move || {
-        use gloo_utils::format::JsValueSerdeExt;
-        use web_sys::{
-            js_sys::{Function, Reflect},
-            wasm_bindgen::{JsCast, JsValue},
-        };
-
-        let instance = if let Some(instance) = chart_instance() {
-            instance
-        } else {
-            return;
-        };
-
-        let series_data = match &*indicators.read_unchecked() {
-            Some(Ok(series)) => series.clone(),
-            Some(Err(_)) | None => return,
-        };
-
-        let macd_series = series_data
-            .macd
-            .iter()
-            .map(|point| ChartData {
-                x: point.timestamp.timestamp_millis(),
-                y: point.value,
-            })
-            .collect::<Vec<_>>();
-
-        let signal_series = series_data
-            .signal
-            .iter()
-            .map(|point| ChartData {
-                x: point.timestamp.timestamp_millis(),
-                y: point.value,
-            })
-            .collect::<Vec<_>>();
-
-        let histogram_series = series_data
-            .histogram
-            .iter()
-            .map(|point| ChartData {
-                x: point.timestamp.timestamp_millis(),
-                y: point.value,
-            })
-            .collect::<Vec<_>>();
-
-        let update_series_fn = Reflect::get(&instance, &JsValue::from_str("updateSeries")).unwrap();
-        let update_series_fn: &Function = update_series_fn.dyn_ref().unwrap();
-
-        update_series_fn
-            .call1(
-                &instance,
-                &JsValue::from_serde(&serde_json::json!([
-                    { "data": macd_series, "name": "MACD", "type": "line" },
-                    { "data": signal_series, "name": "Signal", "type": "line" },
-                    { "data": histogram_series, "name": "Histogram", "type": "column" }
-                ]))
-                .unwrap(),
-            )
-            .unwrap();
-    });
-
-    rsx! {
-        div {
-            id: "macd-chart-container",
-            class: "h-[300px]",
-            onmounted: move |element| {
-                chart_element.set(Some(element));
-            },
-        }
-    }
-}
-
-#[component]
-pub fn RsiChart(indicators: Resource<ServerFnResult<MacdRsiSeries>>) -> Element {
-    let mut chart_element: Signal<Option<Event<MountedData>>> = use_signal(|| None);
-    #[cfg(feature = "web")]
-    let mut chart_instance: Signal<Option<web_sys::wasm_bindgen::JsValue>> = use_signal(|| None);
-
-    #[cfg(feature = "web")]
-    use_effect(move || {
-        use dioxus::web::WebEventExt;
-        use gloo_utils::format::JsValueSerdeExt;
-        use web_sys::js_sys::{Array, Function, Reflect};
-        use web_sys::wasm_bindgen::{JsCast, JsValue};
-
-        let el = if let Some(event) = &*chart_element.read_unchecked() {
-            event.as_web_event()
-        } else {
-            return;
-        };
-
-        let window = web_sys::window().unwrap();
-        let apexcharts = Reflect::get(&window, &JsValue::from_str("ApexCharts")).unwrap();
-        let apexcharts_fn: &Function = apexcharts.dyn_ref().unwrap();
-        let param_array = Array::new();
-        param_array.push(&el);
-        param_array.push(
-            &JsValue::from_serde(&serde_json::json!({
-                "series": [],
-                "chart": {
-                    "type": "line",
-                    "height": 300,
-                    "toolbar": { "show": false }
-                },
-                "dataLabels": { "enabled": false },
-                "xaxis": {
-                    "type": "datetime",
-                    "labels": {
-                        "datetimeUTC": false,
-                        "style": {
-                            "colors": "var(--color-base-content)",
-                            "fontSize": "12px"
-                        }
-                    }
-                },
-                "yaxis": {
-                    "min": 0,
-                    "max": 100,
-                    "labels": {
-                        "style": {
-                            "colors": "var(--color-base-content)",
-                            "fontSize": "12px"
-                        }
-                    }
-                },
-                "annotations": {
-                    "yaxis": [
-                        { "y": 70, "borderColor": "var(--color-base-content)" },
-                        { "y": 30, "borderColor": "var(--color-base-content)" }
-                    ]
-                },
-                "tooltip": {
-                    "x": { "format": "MMM dd HH:mm" }
-                }
-            }))
-            .unwrap(),
-        );
-        let instance = Reflect::construct(apexcharts_fn, &param_array).unwrap();
-
-        let render_fn = Reflect::get(&instance, &JsValue::from_str("render")).unwrap();
-        let render_fn: &Function = render_fn.dyn_ref().unwrap();
-        render_fn.call0(&instance).unwrap();
-
-        chart_instance.set(Some(instance));
-    });
-
-    #[cfg(feature = "web")]
-    use_effect(move || {
-        use gloo_utils::format::JsValueSerdeExt;
-        use web_sys::{
-            js_sys::{Function, Reflect},
-            wasm_bindgen::{JsCast, JsValue},
-        };
-
-        let instance = if let Some(instance) = chart_instance() {
-            instance
-        } else {
-            return;
-        };
-
-        let series_data = match &*indicators.read_unchecked() {
-            Some(Ok(series)) => series.clone(),
-            Some(Err(_)) | None => return,
-        };
-
-        let rsi_series = series_data
-            .rsi
-            .iter()
-            .map(|point| ChartData {
-                x: point.timestamp.timestamp_millis(),
-                y: point.value,
-            })
-            .collect::<Vec<_>>();
-
-        let update_series_fn = Reflect::get(&instance, &JsValue::from_str("updateSeries")).unwrap();
-        let update_series_fn: &Function = update_series_fn.dyn_ref().unwrap();
-
-        update_series_fn
-            .call1(
-                &instance,
-                &JsValue::from_serde(&serde_json::json!([
-                    { "data": rsi_series, "name": "RSI" }
-                ]))
-                .unwrap(),
-            )
-            .unwrap();
-    });
-
-    rsx! {
-        div {
-            id: "rsi-chart-container",
-            class: "h-[300px]",
-            onmounted: move |element| {
-                chart_element.set(Some(element));
-            },
-        }
-    }
-}
-
 #[server]
 async fn get_rate() -> ServerFnResult<Vec<RateRecord>> {
     let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
@@ -1093,211 +859,4 @@ async fn get_candles(interval_hours: i64) -> ServerFnResult<Vec<Candle>> {
     }
 
     Ok(candles)
-}
-
-#[server]
-async fn get_indicators(interval_hours: i64) -> ServerFnResult<MacdRsiSeries> {
-    let axum::Extension(state): axum::Extension<crate::server::models::AppState> =
-        FullstackContext::extract().await?;
-
-    let mut records = state.get_history();
-    records.sort_by_key(|record| record.timestamp);
-
-    let interval_hours = interval_hours.max(1);
-    let interval = Duration::hours(interval_hours);
-    let interval_secs = interval.num_seconds();
-
-    let mut candles = Vec::new();
-
-    let mut current_start: Option<DateTime<Utc>> = None;
-    let mut open = 0.0;
-    let mut high = f64::MIN;
-    let mut low = f64::MAX;
-    let mut close = 0.0;
-
-    for record in records {
-        let rate = match record.rate.parse::<f64>() {
-            Ok(rate) => rate,
-            Err(_) => continue,
-        };
-        let ts = record.timestamp.timestamp();
-        let bucket_ts = ts - (ts % interval_secs);
-        let bucket_start = Utc.timestamp_opt(bucket_ts, 0).single().unwrap();
-
-        if current_start
-            .map(|start| start != bucket_start)
-            .unwrap_or(true)
-        {
-            if let Some(start) = current_start {
-                candles.push(Candle {
-                    open,
-                    high,
-                    low,
-                    close,
-                    start_timestamp: start,
-                    end_timestamp: start + interval,
-                });
-            }
-            current_start = Some(bucket_start);
-            open = rate;
-            high = rate;
-            low = rate;
-            close = rate;
-        } else {
-            if rate > high {
-                high = rate;
-            }
-            if rate < low {
-                low = rate;
-            }
-            close = rate;
-        }
-    }
-
-    if let Some(start) = current_start {
-        candles.push(Candle {
-            open,
-            high,
-            low,
-            close,
-            start_timestamp: start,
-            end_timestamp: start + interval,
-        });
-    }
-
-    let closes = candles
-        .iter()
-        .map(|candle| (candle.end_timestamp, candle.close))
-        .collect::<Vec<_>>();
-    let close_values = closes.iter().map(|(_, value)| *value).collect::<Vec<_>>();
-
-    fn ema(values: &[f64], period: usize) -> Vec<Option<f64>> {
-        let mut out = vec![None; values.len()];
-        if values.len() < period || period == 0 {
-            return out;
-        }
-
-        let sum: f64 = values.iter().take(period).sum();
-        let mut prev = sum / period as f64;
-        out[period - 1] = Some(prev);
-
-        let alpha = 2.0 / (period as f64 + 1.0);
-        for i in period..values.len() {
-            let next = alpha * values[i] + (1.0 - alpha) * prev;
-            out[i] = Some(next);
-            prev = next;
-        }
-
-        out
-    }
-
-    fn rsi(values: &[f64], period: usize) -> Vec<Option<f64>> {
-        let mut out = vec![None; values.len()];
-        if values.len() <= period || period == 0 {
-            return out;
-        }
-
-        let mut gain = 0.0;
-        let mut loss = 0.0;
-        for i in 1..=period {
-            let diff = values[i] - values[i - 1];
-            if diff >= 0.0 {
-                gain += diff;
-            } else {
-                loss += -diff;
-            }
-        }
-
-        let mut avg_gain = gain / period as f64;
-        let mut avg_loss = loss / period as f64;
-
-        let rs = if avg_loss == 0.0 {
-            f64::INFINITY
-        } else {
-            avg_gain / avg_loss
-        };
-        out[period] = Some(100.0 - (100.0 / (1.0 + rs)));
-
-        for i in (period + 1)..values.len() {
-            let diff = values[i] - values[i - 1];
-            let current_gain = if diff > 0.0 { diff } else { 0.0 };
-            let current_loss = if diff < 0.0 { -diff } else { 0.0 };
-
-            avg_gain = (avg_gain * (period as f64 - 1.0) + current_gain) / period as f64;
-            avg_loss = (avg_loss * (period as f64 - 1.0) + current_loss) / period as f64;
-
-            let rs = if avg_loss == 0.0 {
-                f64::INFINITY
-            } else {
-                avg_gain / avg_loss
-            };
-            out[i] = Some(100.0 - (100.0 / (1.0 + rs)));
-        }
-
-        out
-    }
-
-    let ema12 = ema(&close_values, 12);
-    let ema26 = ema(&close_values, 26);
-
-    let mut macd_vals = vec![None; close_values.len()];
-    for i in 0..close_values.len() {
-        if let (Some(fast), Some(slow)) = (ema12[i], ema26[i]) {
-            macd_vals[i] = Some(fast - slow);
-        }
-    }
-
-    let mut macd_compact = Vec::new();
-    let mut macd_index = Vec::new();
-    for (i, value) in macd_vals.iter().enumerate() {
-        if let Some(val) = value {
-            macd_compact.push(*val);
-            macd_index.push(i);
-        }
-    }
-
-    let signal_compact = ema(&macd_compact, 9);
-    let mut signal_vals = vec![None; close_values.len()];
-    for (pos, idx) in macd_index.iter().enumerate() {
-        if let Some(val) = signal_compact[pos] {
-            signal_vals[*idx] = Some(val);
-        }
-    }
-
-    let mut histogram_vals = vec![None; close_values.len()];
-    for i in 0..close_values.len() {
-        if let (Some(macd), Some(signal)) = (macd_vals[i], signal_vals[i]) {
-            histogram_vals[i] = Some(macd - signal);
-        }
-    }
-
-    let rsi_vals = rsi(&close_values, 14);
-
-    let mut macd = Vec::new();
-    let mut signal = Vec::new();
-    let mut histogram = Vec::new();
-    let mut rsi = Vec::new();
-
-    for i in 0..close_values.len() {
-        let timestamp = closes[i].0;
-        if let Some(value) = macd_vals[i] {
-            macd.push(IndicatorPoint { timestamp, value });
-        }
-        if let Some(value) = signal_vals[i] {
-            signal.push(IndicatorPoint { timestamp, value });
-        }
-        if let Some(value) = histogram_vals[i] {
-            histogram.push(IndicatorPoint { timestamp, value });
-        }
-        if let Some(value) = rsi_vals[i] {
-            rsi.push(IndicatorPoint { timestamp, value });
-        }
-    }
-
-    Ok(MacdRsiSeries {
-        macd,
-        signal,
-        histogram,
-        rsi,
-    })
 }
